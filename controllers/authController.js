@@ -15,10 +15,59 @@ const generateRefreshToken = (id) => {
   });
 };
 
+const bcrypt = require('bcryptjs');
+const AcademicYear = require('../models/AcademicYear');
+const Setting = require('../models/Setting');
+const FeeCategory = require('../models/FeeCategory');
+const FeeStructure = require('../models/FeeStructure');
+const Student = require('../models/Student');
+const FeeDemand = require('../models/FeeDemand');
+const Payment = require('../models/Payment');
+const AuditLog = require('../models/AuditLog');
+
+// Auto seed default admin & accountant accounts if DB is empty
+const ensureDefaultUsersExist = async () => {
+  try {
+    const userCount = await User.countDocuments();
+    if (userCount === 0) {
+      const salt = await bcrypt.genSalt(12);
+
+      await Setting.insertMany([
+        { key: 'collegeName', value: 'Sri Vidya Degree College' },
+        { key: 'collegeAddress', value: 'Kukatpally, Hyderabad, Telangana - 500072' },
+        { key: 'allowAdvancePayment', value: false }
+      ]);
+
+      await AcademicYear.insertMany([
+        { year: '2024-25', startDate: new Date('2024-06-01'), endDate: new Date('2025-05-31'), isCurrent: false, status: 'active' },
+        { year: '2025-26', startDate: new Date('2025-06-01'), endDate: new Date('2026-05-31'), isCurrent: false, status: 'active' },
+        { year: '2026-27', startDate: new Date('2026-06-01'), endDate: new Date('2027-05-31'), isCurrent: true, status: 'active' }
+      ]);
+
+      await User.insertMany([
+        { userId: 'USR-0001', name: 'Dr. Ramesh Kumar', username: 'admin', password: await bcrypt.hash('admin123', salt), role: 'admin', status: 'active' },
+        { userId: 'USR-0002', name: 'Suresh Reddy', username: 'suresh', password: await bcrypt.hash('acc123', salt), role: 'accountant', status: 'active' }
+      ]);
+
+      await FeeCategory.insertMany([
+        { name: 'Tuition Fee', description: 'Annual tuition fee', isDefault: true, status: 'active' },
+        { name: 'Admission Fee', description: 'One-time admission fee', isDefault: true, status: 'active' },
+        { name: 'Examination Fee', description: 'Semester examination fee', isDefault: true, status: 'active' },
+        { name: 'University Fee', description: 'University registration fee', isDefault: true, status: 'active' },
+        { name: 'Laboratory Fee', description: 'Lab usage fee', isDefault: true, status: 'active' },
+        { name: 'Library Fee', description: 'Library access fee', isDefault: true, status: 'active' }
+      ]);
+    }
+  } catch (err) {
+    console.error('Error auto-seeding default users:', err);
+  }
+};
+
 // @desc    Login user
 // @route   POST /api/auth/login
 exports.login = async (req, res) => {
   try {
+    await ensureDefaultUsersExist();
     const { username, password } = req.body;
 
     if (!username || !password) {
