@@ -40,6 +40,7 @@ app.use('/api/users', require('./routes/users'));
 app.use('/api/exports', require('./routes/exports'));
 app.use('/api/courses', require('./routes/courses'));
 app.use('/api/audit', require('./routes/audit'));
+app.use('/api/imports', require('./routes/imports'));
 
 // Health check
 app.get('/api/health', (req, res) => {
