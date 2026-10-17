@@ -2,6 +2,8 @@ const FeeCategory = require('../models/FeeCategory');
 const FeeStructure = require('../models/FeeStructure');
 const FeeDemand = require('../models/FeeDemand');
 const Student = require('../models/Student');
+const Course = require('../models/Course');
+const AcademicYear = require('../models/AcademicYear');
 const { createAuditLog, generateId } = require('../utils/helpers');
 
 // ==================== FEE CATEGORIES ====================
@@ -503,5 +505,223 @@ exports.createDemand = async (req, res) => {
     res.status(201).json({ success: true, data: demand, message: 'Fee demand updated' });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message || 'Server error' });
+  }
+};
+
+// @desc    Generate standard DEMO Fee Structures for Academic Year 2026-27
+// @route   POST /api/fees/demo-structures
+// @access  Admin only
+exports.generateDemoFeeStructures = async (req, res) => {
+  try {
+    const academicYear = req.body.academicYear || '2026-27';
+
+    // 1. Ensure core Fee Categories exist with correct frequency
+    const standardCategories = [
+      { name: 'Tuition Fee', description: 'Annual Tuition Fee (DEMO)', frequency: 'ANNUAL', isDefault: true },
+      { name: 'UDF Fee', description: 'User Development Fee charged annually per student (DEMO)', frequency: 'ANNUAL', isDefault: true },
+      { name: 'Exam Fee', description: 'Semester Examination Fee (DEMO)', frequency: 'SEMESTER', isDefault: true },
+      { name: 'Practical Fee', description: 'Semester Practical and Laboratory Fee (DEMO)', frequency: 'SEMESTER', isDefault: true },
+      { name: 'Admission Fee', description: 'One-time Admission Fee for new admissions (DEMO)', frequency: 'ONE_TIME', isDefault: true }
+    ];
+
+    for (const cat of standardCategories) {
+      const existingCat = await FeeCategory.findOne({ name: new RegExp(`^${escapeRegex(cat.name)}$`, 'i') });
+      if (!existingCat) {
+        await FeeCategory.create(cat);
+      } else if (existingCat.frequency !== cat.frequency) {
+        existingCat.frequency = cat.frequency;
+        await existingCat.save();
+      }
+    }
+
+    // 2. Ensure academic year exists in AcademicYear collection
+    const ayDoc = await AcademicYear.findOne({ year: academicYear });
+    if (!ayDoc) {
+      await AcademicYear.create({
+        year: academicYear,
+        startDate: new Date('2026-06-01'),
+        endDate: new Date('2027-05-31'),
+        isCurrent: true,
+        status: 'active'
+      });
+    }
+
+    // 3. Expected Courses in Catalog
+    const EXPECTED_COURSES = [
+      { degree: 'B.Sc', specialization: 'Chemistry', courseName: 'B.Sc Chemistry', duration: 3, level: 'UG' },
+      { degree: 'B.Sc', specialization: 'Computer Science', courseName: 'B.Sc Computer Science', duration: 3, level: 'UG' },
+      { degree: 'B.Sc', specialization: 'Zoology', courseName: 'B.Sc Zoology', duration: 3, level: 'UG' },
+      { degree: 'B.Com', specialization: 'Computer Application', courseName: 'B.Com Computer Application', duration: 3, level: 'UG' },
+      { degree: 'M.Sc', specialization: 'Organic Chemistry', courseName: 'M.Sc Organic Chemistry', duration: 2, level: 'PG' }
+    ];
+
+    for (const c of EXPECTED_COURSES) {
+      let courseDoc = await Course.findOne({
+        degree: new RegExp(`^${escapeRegex(c.degree)}$`, 'i'),
+        specialization: new RegExp(`^${escapeRegex(c.specialization)}$`, 'i')
+      });
+      if (!courseDoc) {
+        const courseId = await generateId(Course, 'CRS', 'courseId');
+        await Course.create({
+          courseId,
+          degree: c.degree,
+          specialization: c.specialization,
+          courseName: c.courseName,
+          duration: c.duration,
+          level: c.level,
+          status: 'active'
+        });
+      }
+    }
+
+    // 4. Generate demo fee terms per course and year of study
+    let createdCount = 0;
+    let reusedCount = 0;
+    const structuresConfigured = [];
+
+    for (const c of EXPECTED_COURSES) {
+      const years = c.duration === 2 ? ['1st Year', '2nd Year'] : ['1st Year', '2nd Year', '3rd Year'];
+
+      for (const year of years) {
+        // Base annual & semester fee terms
+        const terms = [
+          {
+            category: 'Tuition Fee',
+            amount: 30000,
+            frequency: 'ANNUAL',
+            semester: null,
+            activationDate: new Date('2026-06-01'),
+            dueDate: new Date('2026-07-31')
+          },
+          {
+            category: 'UDF Fee',
+            amount: 1000,
+            frequency: 'ANNUAL',
+            semester: null,
+            activationDate: new Date('2026-06-01'),
+            dueDate: new Date('2026-07-31')
+          },
+          {
+            category: 'Exam Fee',
+            amount: 1000,
+            frequency: 'SEMESTER',
+            semester: 'Semester 1',
+            activationDate: new Date('2026-10-01'),
+            dueDate: new Date('2026-10-31')
+          },
+          {
+            category: 'Exam Fee',
+            amount: 1000,
+            frequency: 'SEMESTER',
+            semester: 'Semester 2',
+            activationDate: new Date('2027-03-01'),
+            dueDate: new Date('2027-03-31')
+          },
+          {
+            category: 'Practical Fee',
+            amount: 2000,
+            frequency: 'SEMESTER',
+            semester: 'Semester 1',
+            activationDate: new Date('2026-10-01'),
+            dueDate: new Date('2026-10-31')
+          },
+          {
+            category: 'Practical Fee',
+            amount: 2000,
+            frequency: 'SEMESTER',
+            semester: 'Semester 2',
+            activationDate: new Date('2027-03-01'),
+            dueDate: new Date('2027-03-31')
+          }
+        ];
+
+        // One-time Admission Fee for 1st Year only
+        if (year === '1st Year') {
+          terms.push({
+            category: 'Admission Fee',
+            amount: 2000,
+            frequency: 'ONE_TIME',
+            semester: null,
+            activationDate: new Date('2026-06-01'),
+            dueDate: new Date('2026-07-31')
+          });
+        }
+
+        for (const term of terms) {
+          const query = {
+            course: new RegExp(`^${escapeRegex(c.courseName)}$`, 'i'),
+            year: new RegExp(`^${escapeRegex(year)}$`, 'i'),
+            academicYear: academicYear,
+            category: new RegExp(`^${escapeRegex(term.category)}$`, 'i'),
+            semester: term.semester,
+            status: 'active'
+          };
+
+          let structure = await FeeStructure.findOne(query);
+
+          if (structure) {
+            structure.amount = term.amount;
+            structure.frequency = term.frequency;
+            structure.activationDate = term.activationDate;
+            structure.dueDate = term.dueDate;
+            structure.isDemo = true;
+            structure.remarks = `DEMO Fee Structure (Fictional Test Data for AY ${academicYear})`;
+            await structure.save();
+            reusedCount++;
+            structuresConfigured.push(structure);
+          } else {
+            const feeId = await generateId(FeeStructure, 'FEE', 'feeId');
+            structure = await FeeStructure.create({
+              feeId,
+              course: c.courseName,
+              level: c.level,
+              year,
+              academicYear,
+              category: term.category,
+              amount: term.amount,
+              frequency: term.frequency,
+              semester: term.semester,
+              activationDate: term.activationDate,
+              dueDate: term.dueDate,
+              status: 'active',
+              isDemo: true,
+              remarks: `DEMO Fee Structure (Fictional Test Data for AY ${academicYear})`
+            });
+            createdCount++;
+            structuresConfigured.push(structure);
+          }
+        }
+
+        // Automatically sync with any enrolled students in this course & year
+        await syncStructureWithStudents(c.courseName, c.level, year, academicYear, req.user);
+      }
+    }
+
+    // Log to AuditLog
+    await createAuditLog({
+      user: req.user?._id,
+      userName: req.user?.name || 'Admin',
+      userRole: req.user?.role || 'admin',
+      action: 'Generate Demo Fee Structures',
+      entity: 'FeeStructure',
+      description: `Configured standard DEMO fee structures for AY ${academicYear}: ${createdCount} created, ${reusedCount} updated/reused across 5 courses (${structuresConfigured.length} total terms).`,
+      newValue: { academicYear, createdCount, reusedCount, totalDemoTerms: structuresConfigured.length },
+      ipAddress: req.ip
+    });
+
+    res.json({
+      success: true,
+      message: `Successfully configured standard DEMO fee structures for Academic Year ${academicYear} (${structuresConfigured.length} terms across 5 courses)`,
+      data: {
+        academicYear,
+        createdCount,
+        reusedCount,
+        totalStructures: structuresConfigured.length,
+        coursesConfigured: EXPECTED_COURSES.map(c => c.courseName)
+      }
+    });
+  } catch (error) {
+    console.error('Generate demo fee structures error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Server error generating demo fee structures' });
   }
 };

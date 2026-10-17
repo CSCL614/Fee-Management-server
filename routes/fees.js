@@ -4,7 +4,7 @@ const { protect, authorize } = require('../middleware/auth');
 const {
   getCategories, createCategory, updateCategory,
   getStructures, createStructure, updateStructure, deleteStructure,
-  getDemands, createDemand
+  getDemands, createDemand, generateDemoFeeStructures
 } = require('../controllers/feeController');
 
 // Categories
@@ -15,6 +15,7 @@ router.put('/categories/:id', protect, authorize('admin', 'accountant'), updateC
 // Structures
 router.get('/structures', protect, getStructures);
 router.post('/structures', protect, authorize('admin', 'accountant'), createStructure);
+router.post('/demo-structures', protect, authorize('admin'), generateDemoFeeStructures);
 router.put('/structures/:id', protect, authorize('admin', 'accountant'), updateStructure);
 router.delete('/structures/:id', protect, authorize('admin', 'accountant'), deleteStructure);
 

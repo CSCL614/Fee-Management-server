@@ -54,6 +54,14 @@ const feeStructureSchema = new mongoose.Schema({
     type: String,
     enum: ['active', 'inactive'],
     default: 'active'
+  },
+  isDemo: {
+    type: Boolean,
+    default: false
+  },
+  remarks: {
+    type: String,
+    default: null
   }
 }, {
   timestamps: true

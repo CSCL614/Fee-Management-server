@@ -358,16 +358,30 @@ function validateRow(row, rowIndex, courses, existingStudentsMap, seenAdmissionN
 
   if (row.degree && row.specialization && row.yearOfStudy && row.academicYear) {
     const courseDisplayName = matchedCourse ? matchedCourse.courseName : `${row.degree} ${row.specialization}`;
-    matchingStructures = feeStructures.filter(fs => {
-      const courseMatch =
+    let matchedFeeStructures = feeStructures.filter(fs => {
+      const isExactCourse =
         fs.course.toLowerCase() === courseDisplayName.toLowerCase() ||
-        fs.course.toLowerCase() === `${row.degree} ${row.specialization}`.toLowerCase() ||
-        fs.course.toLowerCase() === row.degree.toLowerCase();
+        fs.course.toLowerCase() === `${row.degree} ${row.specialization}`.toLowerCase();
       const yearMatch = fs.year.toLowerCase() === row.yearOfStudy.toLowerCase();
       const ayMatch = fs.academicYear === row.academicYear;
-      return courseMatch && yearMatch && ayMatch;
+      return isExactCourse && yearMatch && ayMatch;
     });
 
+    if (matchedFeeStructures.length === 0) {
+      matchedFeeStructures = feeStructures.filter(fs => {
+        const isDegreeMatch = fs.course.toLowerCase() === row.degree.toLowerCase();
+        const yearMatch = fs.year.toLowerCase() === row.yearOfStudy.toLowerCase();
+        const ayMatch = fs.academicYear === row.academicYear;
+        return isDegreeMatch && yearMatch && ayMatch;
+      });
+    }
+
+    // Exclude ONE_TIME fees (Admission Fee) for 2nd and 3rd year students
+    if (row.yearOfStudy !== '1st Year') {
+      matchedFeeStructures = matchedFeeStructures.filter(fs => fs.frequency !== 'ONE_TIME');
+    }
+
+    matchingStructures = matchedFeeStructures;
     backendStructureTotal = matchingStructures.reduce((sum, fs) => sum + (fs.amount || 0), 0);
 
     if (matchingStructures.length === 0) {
@@ -781,15 +795,28 @@ exports.confirmImport = [
 
         // ==================== FEE ASSESSMENT (Section 5) ====================
         // Find matching active FeeStructure in MongoDB
-        const matchingStructures = feeStructures.filter(fs => {
-          const courseMatch =
+        let matchingStructures = feeStructures.filter(fs => {
+          const isExactCourse =
             fs.course.toLowerCase() === courseDisplayName.toLowerCase() ||
-            fs.course.toLowerCase() === `${row.degree} ${row.specialization}`.toLowerCase() ||
-            fs.course.toLowerCase() === row.degree.toLowerCase();
+            fs.course.toLowerCase() === `${row.degree} ${row.specialization}`.toLowerCase();
           const yearMatch = fs.year.toLowerCase() === row.yearOfStudy.toLowerCase();
           const ayMatch = fs.academicYear === row.academicYear;
-          return courseMatch && yearMatch && ayMatch;
+          return isExactCourse && yearMatch && ayMatch;
         });
+
+        if (matchingStructures.length === 0) {
+          matchingStructures = feeStructures.filter(fs => {
+            const isDegreeMatch = fs.course.toLowerCase() === row.degree.toLowerCase();
+            const yearMatch = fs.year.toLowerCase() === row.yearOfStudy.toLowerCase();
+            const ayMatch = fs.academicYear === row.academicYear;
+            return isDegreeMatch && yearMatch && ayMatch;
+          });
+        }
+
+        // Apply frequency rules: Admission Fee is ONE_TIME for 1st Year only!
+        if (row.yearOfStudy !== '1st Year') {
+          matchingStructures = matchingStructures.filter(fs => fs.frequency !== 'ONE_TIME');
+        }
 
         if (matchingStructures.length > 0) {
           const now = new Date();
