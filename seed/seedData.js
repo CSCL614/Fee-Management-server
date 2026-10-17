@@ -26,10 +26,10 @@ async function seed() {
 
     // ==================== SETTINGS ====================
     await Setting.insertMany([
-      { key: 'collegeName', value: 'Sri Vidya Degree College' },
-      { key: 'collegeAddress', value: 'Kukatpally, Hyderabad, Telangana - 500072' },
-      { key: 'collegePhone', value: '040-23456789' },
-      { key: 'collegeEmail', value: 'info@srividya.edu.in' },
+      { key: 'collegeName', value: 'SRI SAI DEGREE & PG COLLEGE' },
+      { key: 'collegeAddress', value: 'Vizianagaram, Andhra Pradesh' },
+      { key: 'collegePhone', value: '08922-234567' },
+      { key: 'collegeEmail', value: 'info@srisaicollege.edu.in' },
       { key: 'allowAdvancePayment', value: false },
       { key: 'emailEnabled', value: false }
     ]);
@@ -53,60 +53,116 @@ async function seed() {
 
     // ==================== FEE CATEGORIES ====================
     const categories = await FeeCategory.insertMany([
-      { name: 'Tuition Fee', description: 'Annual tuition fee', isDefault: true, status: 'active' },
-      { name: 'Admission Fee', description: 'One-time admission fee', isDefault: true, status: 'active' },
-      { name: 'Examination Fee', description: 'Semester examination fee', isDefault: true, status: 'active' },
-      { name: 'University Fee', description: 'University registration fee', isDefault: true, status: 'active' },
-      { name: 'Laboratory Fee', description: 'Lab usage fee', isDefault: true, status: 'active' },
-      { name: 'Library Fee', description: 'Library access fee', isDefault: true, status: 'active' },
-      { name: 'Hostel Fee', description: 'Hostel accommodation fee', isDefault: false, status: 'active' },
-      { name: 'Transport Fee', description: 'College transport fee', isDefault: false, status: 'active' },
-      { name: 'Other Fee', description: 'Miscellaneous fees', isDefault: false, status: 'active' }
+      { name: 'Tuition Fee', description: 'Annual tuition fee', frequency: 'ANNUAL', isDefault: true, status: 'active' },
+      { name: 'UDF Fee', description: 'User development fee (charged once per academic year)', frequency: 'ANNUAL', isDefault: true, status: 'active' },
+      { name: 'Admission Fee', description: 'One-time admission fee', frequency: 'ONE_TIME', isDefault: true, status: 'active' },
+      { name: 'Examination Fee', description: 'Semester examination fee', frequency: 'SEMESTER', isDefault: true, status: 'active' },
+      { name: 'Practical Fee', description: 'Semester practical fee', frequency: 'SEMESTER', isDefault: true, status: 'active' },
+      { name: 'University Fee', description: 'University registration fee', frequency: 'ANNUAL', isDefault: true, status: 'active' },
+      { name: 'Laboratory Fee', description: 'Lab usage fee', frequency: 'ANNUAL', isDefault: true, status: 'active' },
+      { name: 'Library Fee', description: 'Library access fee', frequency: 'ANNUAL', isDefault: true, status: 'active' }
     ]);
     console.log('Created fee categories');
 
     // ==================== FEE STRUCTURES ====================
     const feeData = [
       // BCA - UG
-      { course: 'BCA', level: 'UG', year: '1st Year', academicYear: '2024-25', fees: [['Tuition Fee', 35000], ['Admission Fee', 5000], ['Examination Fee', 3000], ['University Fee', 2000], ['Laboratory Fee', 3000], ['Library Fee', 2000]] },
-      { course: 'BCA', level: 'UG', year: '2nd Year', academicYear: '2025-26', fees: [['Tuition Fee', 38000], ['Examination Fee', 3000], ['University Fee', 2000], ['Laboratory Fee', 3000], ['Library Fee', 2000]] },
-      { course: 'BCA', level: 'UG', year: '3rd Year', academicYear: '2026-27', fees: [['Tuition Fee', 40000], ['Examination Fee', 3500], ['University Fee', 2500], ['Laboratory Fee', 3000], ['Library Fee', 2000]] },
+      { course: 'BCA', level: 'UG', year: '1st Year', academicYear: '2024-25', fees: [
+        { cat: 'Tuition Fee', amt: 35000, freq: 'ANNUAL' },
+        { cat: 'UDF Fee', amt: 500, freq: 'ANNUAL' },
+        { cat: 'Admission Fee', amt: 5000, freq: 'ONE_TIME' },
+        { cat: 'Examination Fee', amt: 1500, freq: 'SEMESTER', sem: 'Semester 1', act: '2024-11-01', due: '2024-11-15' },
+        { cat: 'Examination Fee', amt: 1500, freq: 'SEMESTER', sem: 'Semester 2', act: '2025-04-01', due: '2025-04-15' },
+        { cat: 'Practical Fee', amt: 1000, freq: 'SEMESTER', sem: 'Semester 1', act: '2024-11-01', due: '2024-11-15' },
+        { cat: 'Practical Fee', amt: 1000, freq: 'SEMESTER', sem: 'Semester 2', act: '2025-04-01', due: '2025-04-15' },
+        { cat: 'University Fee', amt: 2000, freq: 'ANNUAL' },
+        { cat: 'Laboratory Fee', amt: 3000, freq: 'ANNUAL' },
+        { cat: 'Library Fee', amt: 2000, freq: 'ANNUAL' }
+      ]},
+      { course: 'BCA', level: 'UG', year: '2nd Year', academicYear: '2025-26', fees: [
+        { cat: 'Tuition Fee', amt: 38000, freq: 'ANNUAL' },
+        { cat: 'UDF Fee', amt: 500, freq: 'ANNUAL' },
+        { cat: 'Examination Fee', amt: 1500, freq: 'SEMESTER', sem: 'Semester 1', act: '2025-11-01', due: '2025-11-15' },
+        { cat: 'Examination Fee', amt: 1500, freq: 'SEMESTER', sem: 'Semester 2', act: '2026-04-01', due: '2026-04-15' },
+        { cat: 'Practical Fee', amt: 1000, freq: 'SEMESTER', sem: 'Semester 1', act: '2025-11-01', due: '2025-11-15' },
+        { cat: 'Practical Fee', amt: 1000, freq: 'SEMESTER', sem: 'Semester 2', act: '2026-04-01', due: '2026-04-15' },
+        { cat: 'University Fee', amt: 2000, freq: 'ANNUAL' },
+        { cat: 'Laboratory Fee', amt: 3000, freq: 'ANNUAL' },
+        { cat: 'Library Fee', amt: 2000, freq: 'ANNUAL' }
+      ]},
+      { course: 'BCA', level: 'UG', year: '3rd Year', academicYear: '2026-27', fees: [
+        { cat: 'Tuition Fee', amt: 40000, freq: 'ANNUAL' },
+        { cat: 'UDF Fee', amt: 500, freq: 'ANNUAL' },
+        { cat: 'Examination Fee', amt: 1500, freq: 'SEMESTER', sem: 'Semester 1', act: '2026-11-01', due: '2026-11-15' },
+        { cat: 'Examination Fee', amt: 1500, freq: 'SEMESTER', sem: 'Semester 2', act: '2027-04-01', due: '2027-04-15' },
+        { cat: 'Practical Fee', amt: 1000, freq: 'SEMESTER', sem: 'Semester 1', act: '2026-11-01', due: '2026-11-15' },
+        { cat: 'Practical Fee', amt: 1000, freq: 'SEMESTER', sem: 'Semester 2', act: '2027-04-01', due: '2027-04-15' },
+        { cat: 'University Fee', amt: 2500, freq: 'ANNUAL' },
+        { cat: 'Laboratory Fee', amt: 3000, freq: 'ANNUAL' },
+        { cat: 'Library Fee', amt: 2000, freq: 'ANNUAL' }
+      ]},
       // BBA - UG
-      { course: 'BBA', level: 'UG', year: '1st Year', academicYear: '2024-25', fees: [['Tuition Fee', 30000], ['Admission Fee', 5000], ['Examination Fee', 2500], ['University Fee', 2000], ['Library Fee', 1500]] },
-      { course: 'BBA', level: 'UG', year: '2nd Year', academicYear: '2025-26', fees: [['Tuition Fee', 32000], ['Examination Fee', 2500], ['University Fee', 2000], ['Library Fee', 1500]] },
-      { course: 'BBA', level: 'UG', year: '3rd Year', academicYear: '2026-27', fees: [['Tuition Fee', 35000], ['Examination Fee', 3000], ['University Fee', 2500], ['Library Fee', 1500]] },
-      // BSc - UG
-      { course: 'BSc', level: 'UG', year: '1st Year', academicYear: '2024-25', fees: [['Tuition Fee', 25000], ['Admission Fee', 4000], ['Examination Fee', 2000], ['University Fee', 1500], ['Laboratory Fee', 5000], ['Library Fee', 1500]] },
-      { course: 'BSc', level: 'UG', year: '2nd Year', academicYear: '2025-26', fees: [['Tuition Fee', 27000], ['Examination Fee', 2000], ['University Fee', 1500], ['Laboratory Fee', 5000], ['Library Fee', 1500]] },
-      { course: 'BSc', level: 'UG', year: '3rd Year', academicYear: '2026-27', fees: [['Tuition Fee', 30000], ['Examination Fee', 2500], ['University Fee', 2000], ['Laboratory Fee', 5000], ['Library Fee', 1500]] },
-      // Also create BCA/BBA/BSc fee structures for 2025-26 1st year and 2026-27 1st/2nd year for newer students
-      { course: 'BCA', level: 'UG', year: '1st Year', academicYear: '2025-26', fees: [['Tuition Fee', 37000], ['Admission Fee', 5000], ['Examination Fee', 3000], ['University Fee', 2000], ['Laboratory Fee', 3000], ['Library Fee', 2000]] },
-      { course: 'BCA', level: 'UG', year: '1st Year', academicYear: '2026-27', fees: [['Tuition Fee', 40000], ['Admission Fee', 5500], ['Examination Fee', 3500], ['University Fee', 2500], ['Laboratory Fee', 3000], ['Library Fee', 2000]] },
-      { course: 'BCA', level: 'UG', year: '2nd Year', academicYear: '2026-27', fees: [['Tuition Fee', 40000], ['Examination Fee', 3500], ['University Fee', 2500], ['Laboratory Fee', 3000], ['Library Fee', 2000]] },
-      { course: 'BBA', level: 'UG', year: '1st Year', academicYear: '2025-26', fees: [['Tuition Fee', 32000], ['Admission Fee', 5000], ['Examination Fee', 2500], ['University Fee', 2000], ['Library Fee', 1500]] },
-      { course: 'BBA', level: 'UG', year: '1st Year', academicYear: '2026-27', fees: [['Tuition Fee', 35000], ['Admission Fee', 5500], ['Examination Fee', 3000], ['University Fee', 2500], ['Library Fee', 1500]] },
-      { course: 'BBA', level: 'UG', year: '2nd Year', academicYear: '2026-27', fees: [['Tuition Fee', 35000], ['Examination Fee', 3000], ['University Fee', 2500], ['Library Fee', 1500]] },
+      { course: 'BBA', level: 'UG', year: '1st Year', academicYear: '2024-25', fees: [
+        { cat: 'Tuition Fee', amt: 30000, freq: 'ANNUAL' },
+        { cat: 'UDF Fee', amt: 500, freq: 'ANNUAL' },
+        { cat: 'Admission Fee', amt: 5000, freq: 'ONE_TIME' },
+        { cat: 'Examination Fee', amt: 1500, freq: 'SEMESTER', sem: 'Semester 1', act: '2024-11-01', due: '2024-11-15' },
+        { cat: 'Examination Fee', amt: 1500, freq: 'SEMESTER', sem: 'Semester 2', act: '2025-04-01', due: '2025-04-15' },
+        { cat: 'University Fee', amt: 2000, freq: 'ANNUAL' },
+        { cat: 'Library Fee', amt: 1500, freq: 'ANNUAL' }
+      ]},
+      { course: 'BBA', level: 'UG', year: '2nd Year', academicYear: '2025-26', fees: [
+        { cat: 'Tuition Fee', amt: 32000, freq: 'ANNUAL' },
+        { cat: 'UDF Fee', amt: 500, freq: 'ANNUAL' },
+        { cat: 'Examination Fee', amt: 1500, freq: 'SEMESTER', sem: 'Semester 1', act: '2025-11-01', due: '2025-11-15' },
+        { cat: 'Examination Fee', amt: 1500, freq: 'SEMESTER', sem: 'Semester 2', act: '2026-04-01', due: '2026-04-15' },
+        { cat: 'University Fee', amt: 2000, freq: 'ANNUAL' },
+        { cat: 'Library Fee', amt: 1500, freq: 'ANNUAL' }
+      ]},
+      { course: 'BBA', level: 'UG', year: '3rd Year', academicYear: '2026-27', fees: [
+        { cat: 'Tuition Fee', amt: 35000, freq: 'ANNUAL' },
+        { cat: 'UDF Fee', amt: 500, freq: 'ANNUAL' },
+        { cat: 'Examination Fee', amt: 1500, freq: 'SEMESTER', sem: 'Semester 1', act: '2026-11-01', due: '2026-11-15' },
+        { cat: 'Examination Fee', amt: 1500, freq: 'SEMESTER', sem: 'Semester 2', act: '2027-04-01', due: '2027-04-15' },
+        { cat: 'University Fee', amt: 2500, freq: 'ANNUAL' },
+        { cat: 'Library Fee', amt: 1500, freq: 'ANNUAL' }
+      ]},
       // MBA - PG
-      { course: 'MBA', level: 'PG', year: '1st Year', academicYear: '2025-26', fees: [['Tuition Fee', 60000], ['Admission Fee', 10000], ['Examination Fee', 5000], ['University Fee', 3000], ['Library Fee', 2000]] },
-      { course: 'MBA', level: 'PG', year: '2nd Year', academicYear: '2026-27', fees: [['Tuition Fee', 65000], ['Examination Fee', 5000], ['University Fee', 3000], ['Library Fee', 2000]] },
-      { course: 'MBA', level: 'PG', year: '1st Year', academicYear: '2026-27', fees: [['Tuition Fee', 65000], ['Admission Fee', 10000], ['Examination Fee', 5000], ['University Fee', 3500], ['Library Fee', 2000]] },
-      // MCA - PG
-      { course: 'MCA', level: 'PG', year: '1st Year', academicYear: '2025-26', fees: [['Tuition Fee', 55000], ['Admission Fee', 8000], ['Examination Fee', 4000], ['University Fee', 3000], ['Laboratory Fee', 5000], ['Library Fee', 2000]] },
-      { course: 'MCA', level: 'PG', year: '2nd Year', academicYear: '2026-27', fees: [['Tuition Fee', 58000], ['Examination Fee', 4000], ['University Fee', 3000], ['Laboratory Fee', 5000], ['Library Fee', 2000]] },
-      { course: 'MCA', level: 'PG', year: '1st Year', academicYear: '2026-27', fees: [['Tuition Fee', 58000], ['Admission Fee', 8500], ['Examination Fee', 4500], ['University Fee', 3500], ['Laboratory Fee', 5000], ['Library Fee', 2000]] },
-      // MSc - PG
-      { course: 'MSc', level: 'PG', year: '1st Year', academicYear: '2025-26', fees: [['Tuition Fee', 40000], ['Admission Fee', 6000], ['Examination Fee', 3000], ['University Fee', 2500], ['Laboratory Fee', 6000], ['Library Fee', 1500]] },
-      { course: 'MSc', level: 'PG', year: '2nd Year', academicYear: '2026-27', fees: [['Tuition Fee', 42000], ['Examination Fee', 3000], ['University Fee', 2500], ['Laboratory Fee', 6000], ['Library Fee', 1500]] },
+      { course: 'MBA', level: 'PG', year: '1st Year', academicYear: '2025-26', fees: [
+        { cat: 'Tuition Fee', amt: 60000, freq: 'ANNUAL' },
+        { cat: 'UDF Fee', amt: 500, freq: 'ANNUAL' },
+        { cat: 'Admission Fee', amt: 10000, freq: 'ONE_TIME' },
+        { cat: 'Examination Fee', amt: 2500, freq: 'SEMESTER', sem: 'Semester 1', act: '2025-11-01', due: '2025-11-15' },
+        { cat: 'Examination Fee', amt: 2500, freq: 'SEMESTER', sem: 'Semester 2', act: '2026-04-01', due: '2026-04-15' },
+        { cat: 'University Fee', amt: 3000, freq: 'ANNUAL' },
+        { cat: 'Library Fee', amt: 2000, freq: 'ANNUAL' }
+      ]},
+      { course: 'MBA', level: 'PG', year: '2nd Year', academicYear: '2026-27', fees: [
+        { cat: 'Tuition Fee', amt: 65000, freq: 'ANNUAL' },
+        { cat: 'UDF Fee', amt: 500, freq: 'ANNUAL' },
+        { cat: 'Examination Fee', amt: 2500, freq: 'SEMESTER', sem: 'Semester 1', act: '2026-11-01', due: '2026-11-15' },
+        { cat: 'Examination Fee', amt: 2500, freq: 'SEMESTER', sem: 'Semester 2', act: '2027-04-01', due: '2027-04-15' },
+        { cat: 'University Fee', amt: 3000, freq: 'ANNUAL' },
+        { cat: 'Library Fee', amt: 2000, freq: 'ANNUAL' }
+      ]}
     ];
 
     let feeCounter = 1;
     const feeStructures = [];
     for (const fd of feeData) {
-      for (const [cat, amt] of fd.fees) {
+      for (const item of fd.fees) {
         feeStructures.push({
           feeId: `FEE-${String(feeCounter++).padStart(4, '0')}`,
-          course: fd.course, level: fd.level, year: fd.year,
-          academicYear: fd.academicYear, category: cat, amount: amt
+          course: fd.course,
+          level: fd.level,
+          year: fd.year,
+          academicYear: fd.academicYear,
+          category: item.cat,
+          amount: item.amt,
+          frequency: item.freq || 'ANNUAL',
+          semester: item.sem || null,
+          activationDate: item.act ? new Date(item.act) : null,
+          dueDate: item.due ? new Date(item.due) : null
         });
       }
     }

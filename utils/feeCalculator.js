@@ -11,13 +11,15 @@ async function calculateFeeSummary(studentId, targetAcademicYear = null) {
   const student = await Student.findOne({ studentId });
   if (!student) throw new Error('Student not found');
 
-  // Get ALL fee demands for this student, sorted chronologically
+  const now = new Date();
+
+  // Get ALL active fee demands for this student, sorted chronologically
   const allDemands = await FeeDemand.find({
     student: student._id,
     status: 'active'
   }).sort({ academicYear: 1 });
 
-  // Get ALL completed payments for this student
+  // Get ALL completed (non-cancelled) payments for this student
   const allPayments = await Payment.find({
     student: student._id,
     status: 'completed'
@@ -31,7 +33,13 @@ async function calculateFeeSummary(studentId, targetAcademicYear = null) {
     const yearPayments = allPayments.filter(p => p.academicYear === demand.academicYear);
     const totalPaidForYear = yearPayments.reduce((sum, p) => sum + p.amountPaid, 0);
 
-    const currentYearFee = demand.totalDemand;
+    const activeCategories = (demand.categories || []).filter(c => !c.activationDate || new Date(c.activationDate) <= now);
+    const upcomingCategories = (demand.categories || []).filter(c => c.activationDate && new Date(c.activationDate) > now);
+
+    const activeDemandTotal = activeCategories.reduce((sum, c) => sum + c.amount, 0);
+    const upcomingDemandTotal = upcomingCategories.reduce((sum, c) => sum + c.amount, 0);
+
+    const currentYearFee = activeDemandTotal;
     const previousYearDue = cumulativeCarryForward;
     const totalPayable = currentYearFee + previousYearDue;
     const totalPaid = totalPaidForYear;
@@ -48,6 +56,7 @@ async function calculateFeeSummary(studentId, targetAcademicYear = null) {
       course: demand.course,
       level: demand.level,
       currentYearFee,
+      upcomingFeeTotal: upcomingDemandTotal,
       previousYearDue,
       totalPayable,
       totalPaid,
@@ -55,6 +64,8 @@ async function calculateFeeSummary(studentId, targetAcademicYear = null) {
       advanceCredit,
       status,
       categories: demand.categories,
+      activeCategories,
+      upcomingCategories,
       payments: yearPayments.map(p => ({
         receiptNo: p.receiptNo,
         amountPaid: p.amountPaid,
@@ -78,7 +89,7 @@ async function calculateFeeSummary(studentId, targetAcademicYear = null) {
     : yearSummaries[yearSummaries.length - 1];
 
   // Overall totals
-  const totalFeeAllYears = allDemands.reduce((sum, d) => sum + d.totalDemand, 0);
+  const totalFeeAllYears = yearSummaries.reduce((sum, d) => sum + d.currentYearFee, 0);
   const totalPaidAllYears = allPayments.reduce((sum, p) => sum + p.amountPaid, 0);
   const totalPendingAllYears = Math.max(0, totalFeeAllYears - totalPaidAllYears);
   const totalAdvanceCredit = totalPaidAllYears > totalFeeAllYears ? totalPaidAllYears - totalFeeAllYears : 0;
@@ -95,6 +106,9 @@ async function calculateFeeSummary(studentId, targetAcademicYear = null) {
       name: student.name,
       course: student.course,
       level: student.level,
+      batch: student.batch,
+      batchStartYear: student.batchStartYear,
+      batchEndYear: student.batchEndYear,
       currentYear: student.currentYear,
       currentAcademicYear: student.currentAcademicYear,
       status: student.status,

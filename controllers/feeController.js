@@ -91,12 +91,26 @@ exports.updateCategory = async (req, res) => {
 // @route   GET /api/fees/structures
 exports.getStructures = async (req, res) => {
   try {
-    const { course, level, year, academicYear } = req.query;
+    const { course, level, year, academicYear, search } = req.query;
     const filter = { status: 'active' };
-    if (course) filter.course = course;
-    if (level) filter.level = level;
-    if (year) filter.year = year;
+    if (course) filter.course = new RegExp(`^${course.trim()}$`, 'i');
+    if (level) filter.level = new RegExp(`^${level.trim()}$`, 'i');
+    if (year) filter.year = new RegExp(`^${year.trim()}$`, 'i');
     if (academicYear) filter.academicYear = academicYear;
+
+    if (search && search.trim()) {
+      const searchTokens = search.trim().toLowerCase().split(/\s+/).filter(Boolean);
+      const tokenRegexes = searchTokens.map(t => new RegExp(t, 'i'));
+      filter.$and = tokenRegexes.map(r => ({
+        $or: [
+          { course: r },
+          { level: r },
+          { year: r },
+          { academicYear: r },
+          { category: r }
+        ]
+      }));
+    }
 
     const structures = await FeeStructure.find(filter).sort({ course: 1, year: 1, category: 1 });
     res.json({ success: true, data: structures });
@@ -105,48 +119,194 @@ exports.getStructures = async (req, res) => {
   }
 };
 
-// @desc    Create fee structure
+// Helper to sync fee structure changes with enrolled students
+const escapeRegex = (s) => (s ? s.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&') : '');
+
+async function syncStructureWithStudents(course, level, year, academicYear, adminUser) {
+  try {
+    if (!course || !year || !academicYear) return;
+
+    const courseRegex = new RegExp(`^${escapeRegex(course.trim())}$`, 'i');
+    const students = await Student.find({
+      $or: [
+        { course: courseRegex },
+        { specialization: courseRegex }
+      ],
+      currentYear: new RegExp(`^${escapeRegex(year.trim())}$`, 'i'),
+      currentAcademicYear: academicYear.trim(),
+      status: 'Active'
+    });
+
+    if (students.length === 0) return;
+
+    // Get all current active fee structure items for this course, year, and academicYear
+    const structures = await FeeStructure.find({
+      course: courseRegex,
+      year: new RegExp(`^${escapeRegex(year.trim())}$`, 'i'),
+      academicYear: academicYear.trim(),
+      status: 'active'
+    });
+
+    const now = new Date();
+    const categoriesFromStructure = structures.map(fs => ({
+      category: fs.category,
+      amount: fs.amount,
+      frequency: fs.frequency || 'ANNUAL',
+      semester: fs.semester || null,
+      activationDate: fs.activationDate || null,
+      dueDate: fs.dueDate || null,
+      status: (fs.activationDate && new Date(fs.activationDate) > now) ? 'upcoming' : 'active'
+    }));
+
+    for (const student of students) {
+      let demand = await FeeDemand.findOne({
+        student: student._id,
+        academicYear: academicYear.trim(),
+        year: year.trim(),
+        status: 'active'
+      });
+
+      if (demand) {
+        // Update categories: replace matching ones or append new terms
+        const updatedCategories = [...demand.categories];
+        for (const item of categoriesFromStructure) {
+          const idx = updatedCategories.findIndex(c =>
+            c.category.toLowerCase() === item.category.toLowerCase() &&
+            (c.semester || '').toString() === (item.semester || '').toString()
+          );
+          if (idx >= 0) {
+            updatedCategories[idx].amount = item.amount;
+            updatedCategories[idx].frequency = item.frequency;
+            updatedCategories[idx].activationDate = item.activationDate;
+            updatedCategories[idx].dueDate = item.dueDate;
+          } else {
+            updatedCategories.push(item);
+          }
+        }
+        demand.categories = updatedCategories;
+        demand.totalDemand = updatedCategories.reduce((sum, c) => sum + c.amount, 0);
+        await demand.save();
+      } else if (categoriesFromStructure.length > 0) {
+        // Create new demand
+        const totalDemand = categoriesFromStructure.reduce((sum, c) => sum + c.amount, 0);
+        await FeeDemand.create({
+          student: student._id,
+          studentId: student.studentId,
+          academicYear: academicYear.trim(),
+          year: year.trim(),
+          course: student.course,
+          level: student.level,
+          categories: categoriesFromStructure,
+          totalDemand,
+          createdBy: adminUser?._id
+        });
+      }
+    }
+  } catch (err) {
+    console.error('Error syncing structure with students:', err);
+  }
+}
+
+// @desc    Create fee structure (supports single term or batch terms)
 // @route   POST /api/fees/structures
 exports.createStructure = async (req, res) => {
   try {
-    const { course, level, year, academicYear, category, amount } = req.body;
-
-    // Check for duplicate
-    const existing = await FeeStructure.findOne({ course, level, year, academicYear, category, status: 'active' });
-    if (existing) {
-      return res.status(400).json({
-        success: false,
-        message: 'Fee structure already exists for this combination'
-      });
-    }
-
-    const feeId = await generateId(FeeStructure, 'FEE', 'feeId');
-
-    const structure = await FeeStructure.create({
-      feeId,
+    const {
       course,
       level,
       year,
       academicYear,
+      items,
       category,
-      amount: parseFloat(amount)
-    });
+      amount,
+      frequency = 'ANNUAL',
+      semester = null,
+      activationDate = null,
+      dueDate = null
+    } = req.body;
 
-    await createAuditLog({
-      user: req.user._id,
-      userName: req.user.name,
-      userRole: req.user.role,
-      action: 'Fee Structure Created',
-      entity: 'FeeStructure',
-      entityId: feeId,
-      description: `Created fee structure: ${course} ${level} ${year} ${academicYear} - ${category}: ₹${amount}`,
-      newValue: { course, level, year, academicYear, category, amount },
-      ipAddress: req.ip
-    });
+    if (!course || !year || !academicYear) {
+      return res.status(400).json({ success: false, message: 'Course, year, and academic year are required' });
+    }
 
-    res.status(201).json({ success: true, data: structure, message: 'Fee structure created' });
+    // Determine level if missing: B.Sc & B.Com = UG, M.Sc = PG
+    const derivedLevel = level || (course.toLowerCase().includes('m.sc') || course.toLowerCase().includes('mba') || course.toLowerCase().includes('mca') ? 'PG' : 'UG');
+
+    const createdStructures = [];
+
+    // If items array is provided (multi-term support)
+    const termsToProcess = Array.isArray(items) && items.length > 0
+      ? items
+      : [{ category, amount, frequency, semester, activationDate, dueDate }];
+
+    for (const term of termsToProcess) {
+      if (!term.category || term.amount === undefined || term.amount === '') continue;
+
+      const trimmedCategory = term.category.trim();
+      const termAmount = parseFloat(term.amount);
+      const termSem = term.semester || null;
+
+      // Check for duplicate
+      let structure = await FeeStructure.findOne({
+        course: new RegExp(`^${escapeRegex(course.trim())}$`, 'i'),
+        year: new RegExp(`^${escapeRegex(year.trim())}$`, 'i'),
+        academicYear: academicYear.trim(),
+        category: new RegExp(`^${escapeRegex(trimmedCategory)}$`, 'i'),
+        semester: termSem,
+        status: 'active'
+      });
+
+      if (structure) {
+        // Update existing amount
+        structure.amount = termAmount;
+        if (term.frequency) structure.frequency = term.frequency;
+        if (term.activationDate) structure.activationDate = new Date(term.activationDate);
+        if (term.dueDate) structure.dueDate = new Date(term.dueDate);
+        await structure.save();
+        createdStructures.push(structure);
+      } else {
+        const feeId = await generateId(FeeStructure, 'FEE', 'feeId');
+        structure = await FeeStructure.create({
+          feeId,
+          course: course.trim(),
+          level: derivedLevel,
+          year: year.trim(),
+          academicYear: academicYear.trim(),
+          category: trimmedCategory,
+          frequency: term.frequency || 'ANNUAL',
+          semester: termSem,
+          activationDate: term.activationDate ? new Date(term.activationDate) : null,
+          dueDate: term.dueDate ? new Date(term.dueDate) : null,
+          amount: termAmount
+        });
+
+        await createAuditLog({
+          user: req.user._id,
+          userName: req.user.name,
+          userRole: req.user.role,
+          action: 'Fee Structure Created',
+          entity: 'FeeStructure',
+          entityId: feeId,
+          description: `Created fee structure: ${course} ${derivedLevel} ${year} ${academicYear} - ${trimmedCategory}: ₹${termAmount}`,
+          newValue: structure.toObject(),
+          ipAddress: req.ip
+        });
+
+        createdStructures.push(structure);
+      }
+    }
+
+    // Automatically sync with enrolled students in this course & year
+    await syncStructureWithStudents(course, derivedLevel, year, academicYear, req.user);
+
+    res.status(201).json({
+      success: true,
+      data: createdStructures.length === 1 ? createdStructures[0] : createdStructures,
+      message: 'Fee structure term(s) saved and synced with enrolled students'
+    });
   } catch (error) {
-    res.status(500).json({ success: false, message: 'Server error' });
+    console.error('Create structure error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Server error' });
   }
 };
 
@@ -163,6 +323,7 @@ exports.updateStructure = async (req, res) => {
 
     if (req.body.amount !== undefined) structure.amount = parseFloat(req.body.amount);
     if (req.body.status) structure.status = req.body.status;
+    if (req.body.category) structure.category = req.body.category.trim();
 
     await structure.save();
 
@@ -173,14 +334,52 @@ exports.updateStructure = async (req, res) => {
       action: 'Fee Structure Updated',
       entity: 'FeeStructure',
       entityId: structure.feeId,
-      description: `Updated fee structure: ${structure.course} ${structure.category}`,
+      description: `Updated fee structure: ${structure.course} ${structure.category} amount to ₹${structure.amount}`,
       oldValue,
-      newValue: { amount: structure.amount, status: structure.status },
+      newValue: { amount: structure.amount, status: structure.status, category: structure.category },
       reason: req.body.reason || 'Fee structure update',
       ipAddress: req.ip
     });
 
-    res.json({ success: true, data: structure, message: 'Fee structure updated' });
+    // Sync with enrolled students
+    await syncStructureWithStudents(structure.course, structure.level, structure.year, structure.academicYear, req.user);
+
+    res.json({ success: true, data: structure, message: 'Fee structure updated and synced' });
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// @desc    Delete fee structure
+// @route   DELETE /api/fees/structures/:id
+exports.deleteStructure = async (req, res) => {
+  try {
+    const structure = await FeeStructure.findOne({ feeId: req.params.id });
+    if (!structure) {
+      return res.status(404).json({ success: false, message: 'Fee structure not found' });
+    }
+
+    structure.status = 'inactive';
+    await structure.save();
+
+    await createAuditLog({
+      user: req.user._id,
+      userName: req.user.name,
+      userRole: req.user.role,
+      action: 'Fee Structure Deleted',
+      entity: 'FeeStructure',
+      entityId: structure.feeId,
+      description: `Deleted fee structure: ${structure.course} ${structure.year} - ${structure.category}`,
+      oldValue: { status: 'active' },
+      newValue: { status: 'inactive' },
+      reason: req.body?.reason || 'Fee structure deletion',
+      ipAddress: req.ip
+    });
+
+    // Sync with enrolled students
+    await syncStructureWithStudents(structure.course, structure.level, structure.year, structure.academicYear, req.user);
+
+    res.json({ success: true, message: 'Fee structure deleted and synced' });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Server error' });
   }
@@ -218,35 +417,76 @@ exports.createDemand = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Student not found' });
     }
 
-    // Check for existing demand
-    const existing = await FeeDemand.findOne({
+    const now = new Date();
+
+    // Fetch all existing active fee demands for this student and academic year
+    const existingDemand = await FeeDemand.findOne({
       student: student._id,
       academicYear,
       status: 'active'
     });
-    if (existing) {
-      return res.status(400).json({
-        success: false,
-        message: 'Fee demand already exists for this student and academic year'
+
+    const existingCategories = existingDemand ? existingDemand.categories : [];
+
+    // Filter categories to prevent duplicates based on business rules
+    const validCategories = [];
+    for (const cat of categories) {
+      const catName = cat.category.trim();
+
+      // Rule: UDF Fee is charged ONCE per student per academic year
+      if (catName.toLowerCase().includes('udf')) {
+        const hasUDF = existingCategories.some(c => c.category.toLowerCase().includes('udf'));
+        if (hasUDF) continue; // Skip duplicate UDF
+      }
+
+      // Rule: Exam Fee & Practical Fee charged per semester per academic year
+      if (catName.toLowerCase().includes('exam') || catName.toLowerCase().includes('practical')) {
+        const hasDup = existingCategories.some(c =>
+          c.category.toLowerCase() === catName.toLowerCase() &&
+          (c.semester || '').toString() === (cat.semester || '').toString()
+        );
+        if (hasDup) continue; // Skip duplicate semester fee
+      }
+
+      const actDate = cat.activationDate ? new Date(cat.activationDate) : null;
+
+      validCategories.push({
+        category: cat.category,
+        amount: parseFloat(cat.amount),
+        frequency: cat.frequency || 'ANNUAL',
+        semester: cat.semester || null,
+        activationDate: actDate,
+        dueDate: cat.dueDate ? new Date(cat.dueDate) : null,
+        status: actDate && actDate > now ? 'upcoming' : 'active'
       });
     }
 
-    const totalDemand = categories.reduce((sum, c) => sum + parseFloat(c.amount), 0);
+    if (validCategories.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'No new fee categories to add or duplicate fee demands detected.'
+      });
+    }
 
-    const demand = await FeeDemand.create({
-      student: student._id,
-      studentId: student.studentId,
-      academicYear,
-      year: year || student.currentYear,
-      course: student.course,
-      level: student.level,
-      categories: categories.map(c => ({
-        category: c.category,
-        amount: parseFloat(c.amount)
-      })),
-      totalDemand,
-      createdBy: req.user._id
-    });
+    let demand;
+    if (existingDemand) {
+      existingDemand.categories.push(...validCategories);
+      existingDemand.totalDemand = existingDemand.categories.reduce((sum, c) => sum + c.amount, 0);
+      demand = await existingDemand.save();
+    } else {
+      const totalDemand = validCategories.reduce((sum, c) => sum + c.amount, 0);
+      demand = await FeeDemand.create({
+        student: student._id,
+        studentId: student.studentId,
+        academicYear,
+        year: year || student.currentYear,
+        course: student.course,
+        level: student.level,
+        categories: validCategories,
+        totalDemand,
+        createdBy: req.user._id
+      });
+    }
 
     await createAuditLog({
       user: req.user._id,
@@ -255,12 +495,12 @@ exports.createDemand = async (req, res) => {
       action: 'Fee Demand Created',
       entity: 'FeeDemand',
       entityId: demand._id.toString(),
-      description: `Created fee demand of ₹${totalDemand} for ${student.name} (${academicYear})`,
-      newValue: { studentId, academicYear, totalDemand, categories },
+      description: `Created fee demand for ${student.name} (${academicYear})`,
+      newValue: { studentId, academicYear, categories: validCategories },
       ipAddress: req.ip
     });
 
-    res.status(201).json({ success: true, data: demand, message: 'Fee demand created' });
+    res.status(201).json({ success: true, data: demand, message: 'Fee demand updated' });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message || 'Server error' });
   }

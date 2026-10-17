@@ -11,6 +11,15 @@ const feeCategorySchema = new mongoose.Schema({
     type: String,
     trim: true
   },
+  frequency: {
+    type: String,
+    enum: ['ONE_TIME', 'ANNUAL', 'SEMESTER', 'CUSTOM'],
+    default: 'ANNUAL'
+  },
+  semester: {
+    type: String,
+    default: null
+  },
   isDefault: {
     type: Boolean,
     default: false

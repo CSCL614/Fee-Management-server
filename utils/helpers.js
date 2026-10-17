@@ -40,13 +40,27 @@ async function createAuditLog({
  * Generate a unique sequential ID.
  */
 async function generateId(Model, prefix, field = 'studentId') {
-  const last = await Model.findOne().sort({ [field]: -1 }).select(field);
-  if (!last || !last[field]) {
-    return `${prefix}-0001`;
+  const items = await Model.find({
+    [field]: new RegExp(`^${prefix}`)
+  }).select(field);
+
+  let maxNum = 0;
+  for (const item of items) {
+    if (item[field]) {
+      const num = parseInt(item[field].split('-').pop(), 10);
+      if (!isNaN(num) && num > maxNum) {
+        maxNum = num;
+      }
+    }
   }
-  const lastNum = parseInt(last[field].split('-').pop());
-  const nextNum = (lastNum + 1).toString().padStart(4, '0');
-  return `${prefix}-${nextNum}`;
+
+  let candidateNum = maxNum + 1;
+  let id = `${prefix}-${candidateNum.toString().padStart(4, '0')}`;
+  while (await Model.exists({ [field]: id })) {
+    candidateNum++;
+    id = `${prefix}-${candidateNum.toString().padStart(4, '0')}`;
+  }
+  return id;
 }
 
 /**
@@ -57,17 +71,30 @@ async function generateReceiptNo() {
   const year = new Date().getFullYear();
   const prefix = `REC-${year}`;
 
-  const lastPayment = await Payment.findOne({
+  const payments = await Payment.find({
     receiptNo: new RegExp(`^${prefix}`)
-  }).sort({ receiptNo: -1 });
+  }).select('receiptNo');
 
-  if (!lastPayment) {
-    return `${prefix}-00001`;
+  let maxNum = 0;
+  for (const p of payments) {
+    if (p.receiptNo) {
+      const parts = p.receiptNo.split('-');
+      const num = parseInt(parts[parts.length - 1], 10);
+      if (!isNaN(num) && num > maxNum) {
+        maxNum = num;
+      }
+    }
   }
 
-  const lastNum = parseInt(lastPayment.receiptNo.split('-').pop());
-  const nextNum = (lastNum + 1).toString().padStart(5, '0');
-  return `${prefix}-${nextNum}`;
+  let candidateNum = maxNum + 1;
+  let receiptNo = `${prefix}-${candidateNum.toString().padStart(5, '0')}`;
+
+  while (await Payment.exists({ receiptNo })) {
+    candidateNum++;
+    receiptNo = `${prefix}-${candidateNum.toString().padStart(5, '0')}`;
+  }
+
+  return receiptNo;
 }
 
 /**

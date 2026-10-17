@@ -1,5 +1,6 @@
 const ExcelJS = require('exceljs');
 const Student = require('../models/Student');
+const Course = require('../models/Course');
 const Payment = require('../models/Payment');
 const FeeStructure = require('../models/FeeStructure');
 const FeeDemand = require('../models/FeeDemand');
@@ -12,7 +13,7 @@ const { calculateFeeSummary } = require('../utils/feeCalculator');
 exports.exportFullExcel = async (req, res) => {
   try {
     const workbook = new ExcelJS.Workbook();
-    workbook.creator = 'College Fee Management System';
+    workbook.creator = 'Sri Sai Degree & PG College Fee Management System';
     workbook.created = new Date();
 
     // Sheet 1: Students
@@ -21,8 +22,11 @@ exports.exportFullExcel = async (req, res) => {
       { header: 'Student ID', key: 'studentId', width: 15 },
       { header: 'Admission No', key: 'admissionNo', width: 18 },
       { header: 'Student Name', key: 'name', width: 25 },
-      { header: 'Course', key: 'course', width: 12 },
+      { header: 'Degree', key: 'degree', width: 12 },
+      { header: 'Specialization', key: 'specialization', width: 22 },
+      { header: 'Course', key: 'course', width: 20 },
       { header: 'Level', key: 'level', width: 8 },
+      { header: 'Batch', key: 'batch', width: 14 },
       { header: 'Year', key: 'currentYear', width: 12 },
       { header: 'Academic Year', key: 'currentAcademicYear', width: 15 },
       { header: 'Email', key: 'email', width: 25 },
@@ -42,10 +46,19 @@ exports.exportFullExcel = async (req, res) => {
       { header: 'Year', key: 'year', width: 12 },
       { header: 'Academic Year', key: 'academicYear', width: 15 },
       { header: 'Category', key: 'category', width: 20 },
-      { header: 'Amount', key: 'amount', width: 15 }
+      { header: 'Frequency', key: 'frequency', width: 15 },
+      { header: 'Semester', key: 'semester', width: 12 },
+      { header: 'Amount', key: 'amount', width: 15 },
+      { header: 'Activation Date', key: 'activationDate', width: 18 },
+      { header: 'Due Date', key: 'dueDate', width: 18 }
     ];
     const feeStructures = await FeeStructure.find({ status: 'active' }).sort({ course: 1 });
-    feeStructures.forEach(f => feeSheet.addRow(f.toObject()));
+    feeStructures.forEach(f => {
+      const row = f.toObject();
+      row.activationDate = f.activationDate ? new Date(f.activationDate).toLocaleDateString('en-IN') : '';
+      row.dueDate = f.dueDate ? new Date(f.dueDate).toLocaleDateString('en-IN') : '';
+      feeSheet.addRow(row);
+    });
     styleHeader(feeSheet);
 
     // Sheet 3: Payments
@@ -170,6 +183,21 @@ exports.exportFullExcel = async (req, res) => {
       });
     });
     styleHeader(auditSheet);
+
+    // Sheet 8: Courses
+    const coursesSheet = workbook.addWorksheet('Courses');
+    coursesSheet.columns = [
+      { header: 'Course ID', key: 'courseId', width: 14 },
+      { header: 'Degree', key: 'degree', width: 12 },
+      { header: 'Specialization', key: 'specialization', width: 25 },
+      { header: 'Course Name', key: 'courseName', width: 25 },
+      { header: 'Duration (Years)', key: 'duration', width: 16 },
+      { header: 'Level', key: 'level', width: 10 },
+      { header: 'Status', key: 'status', width: 12 }
+    ];
+    const courses = await Course.find().sort({ degree: 1, specialization: 1 });
+    courses.forEach(c => coursesSheet.addRow(c.toObject()));
+    styleHeader(coursesSheet);
 
     // Send the workbook
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');

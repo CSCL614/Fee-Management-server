@@ -67,6 +67,22 @@ const paymentSchema = new mongoose.Schema({
     enum: ['completed', 'cancelled'],
     default: 'completed'
   },
+  locked: {
+    type: Boolean,
+    default: true
+  },
+  lockedAt: {
+    type: Date,
+    default: Date.now
+  },
+  editHistory: [{
+    editedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    editedByName: String,
+    editedAt: { type: Date, default: Date.now },
+    oldValue: Object,
+    newValue: Object,
+    reason: String
+  }],
   // If the payment was an advance (excess), track the advance portion
   advanceAmount: {
     type: Number,

@@ -7,7 +7,7 @@ const { protect } = require('../middleware/auth');
 // Rate limiter for login: max 5 attempts per 15 minutes
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 10,
+  max: 500,
   message: { success: false, message: 'Too many login attempts. Please try again after 15 minutes.' },
   standardHeaders: true,
   legacyHeaders: false

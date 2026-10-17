@@ -114,6 +114,7 @@ exports.getDashboardStats = async (req, res) => {
             name: student.name,
             course: student.course,
             level: student.level,
+            batch: student.batch,
             currentYear: student.currentYear,
             totalPending: summary.overall.totalPending,
             feeStatus: summary.overall.status
@@ -122,6 +123,33 @@ exports.getDashboardStats = async (req, res) => {
       } catch { /* skip */ }
     }
     highPending.sort((a, b) => b.totalPending - a.totalPending);
+
+    // Upcoming Fee Activations for Admin Dashboard
+    const upcomingDemands = await FeeDemand.find({
+      status: 'active',
+      'categories.activationDate': { $gt: today }
+    });
+
+    const upcomingMap = {};
+    for (const demand of upcomingDemands) {
+      for (const cat of demand.categories || []) {
+        if (cat.activationDate && new Date(cat.activationDate) > today) {
+          const key = `${cat.category}|${cat.semester || ''}|${cat.activationDate.toISOString().split('T')[0]}`;
+          if (!upcomingMap[key]) {
+            upcomingMap[key] = {
+              category: cat.category,
+              semester: cat.semester,
+              amount: cat.amount,
+              activationDate: cat.activationDate,
+              dueDate: cat.dueDate,
+              studentCount: 0
+            };
+          }
+          upcomingMap[key].studentCount++;
+        }
+      }
+    }
+    const upcomingFeeActivations = Object.values(upcomingMap).sort((a, b) => new Date(a.activationDate) - new Date(b.activationDate));
 
     res.json({
       success: true,
@@ -136,7 +164,8 @@ exports.getDashboardStats = async (req, res) => {
         monthlyCollection,
         courseCollection,
         modeDistribution,
-        highPendingStudents: highPending.slice(0, 10)
+        highPendingStudents: highPending.slice(0, 10),
+        upcomingFeeActivations
       }
     });
   } catch (error) {

@@ -3,7 +3,7 @@ const router = express.Router();
 const { protect, authorize } = require('../middleware/auth');
 const {
   getCategories, createCategory, updateCategory,
-  getStructures, createStructure, updateStructure,
+  getStructures, createStructure, updateStructure, deleteStructure,
   getDemands, createDemand
 } = require('../controllers/feeController');
 
@@ -16,6 +16,7 @@ router.put('/categories/:id', protect, authorize('admin', 'accountant'), updateC
 router.get('/structures', protect, getStructures);
 router.post('/structures', protect, authorize('admin', 'accountant'), createStructure);
 router.put('/structures/:id', protect, authorize('admin', 'accountant'), updateStructure);
+router.delete('/structures/:id', protect, authorize('admin', 'accountant'), deleteStructure);
 
 // Demands
 router.get('/demands', protect, getDemands);

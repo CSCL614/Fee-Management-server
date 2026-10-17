@@ -38,6 +38,7 @@ app.use('/api/fees', require('./routes/fees'));
 app.use('/api/reports', require('./routes/reports'));
 app.use('/api/users', require('./routes/users'));
 app.use('/api/exports', require('./routes/exports'));
+app.use('/api/courses', require('./routes/courses'));
 app.use('/api/audit', require('./routes/audit'));
 
 // Health check

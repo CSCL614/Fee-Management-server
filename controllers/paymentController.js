@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const Payment = require('../models/Payment');
 const Student = require('../models/Student');
 const Setting = require('../models/Setting');
@@ -193,7 +194,9 @@ exports.editPayment = async (req, res) => {
       });
     }
 
-    const payment = await Payment.findOne({ receiptNo: req.params.id });
+    const payment = mongoose.Types.ObjectId.isValid(req.params.id)
+      ? await Payment.findById(req.params.id)
+      : await Payment.findOne({ receiptNo: req.params.id });
     if (!payment) {
       return res.status(404).json({ success: false, message: 'Payment not found' });
     }
@@ -263,7 +266,9 @@ exports.cancelPayment = async (req, res) => {
       });
     }
 
-    const payment = await Payment.findOne({ receiptNo: req.params.id });
+    const payment = mongoose.Types.ObjectId.isValid(req.params.id)
+      ? await Payment.findById(req.params.id)
+      : await Payment.findOne({ receiptNo: req.params.id });
     if (!payment) {
       return res.status(404).json({ success: false, message: 'Payment not found' });
     }

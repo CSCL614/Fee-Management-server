@@ -33,8 +33,8 @@ const ensureDefaultUsersExist = async () => {
       const salt = await bcrypt.genSalt(12);
 
       await Setting.insertMany([
-        { key: 'collegeName', value: 'Sri Vidya Degree College' },
-        { key: 'collegeAddress', value: 'Kukatpally, Hyderabad, Telangana - 500072' },
+        { key: 'collegeName', value: 'SRI SAI DEGREE & PG COLLEGE' },
+        { key: 'collegeAddress', value: 'Vizianagaram, Andhra Pradesh' },
         { key: 'allowAdvancePayment', value: false }
       ]);
 

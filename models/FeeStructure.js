@@ -28,6 +28,23 @@ const feeStructureSchema = new mongoose.Schema({
     type: String,
     required: [true, 'Fee category is required']
   },
+  frequency: {
+    type: String,
+    enum: ['ONE_TIME', 'ANNUAL', 'SEMESTER', 'CUSTOM'],
+    default: 'ANNUAL'
+  },
+  semester: {
+    type: String,
+    default: null
+  },
+  activationDate: {
+    type: Date,
+    default: null
+  },
+  dueDate: {
+    type: Date,
+    default: null
+  },
   amount: {
     type: Number,
     required: [true, 'Amount is required'],
@@ -42,7 +59,7 @@ const feeStructureSchema = new mongoose.Schema({
   timestamps: true
 });
 
-feeStructureSchema.index({ course: 1, level: 1, year: 1, academicYear: 1 });
+feeStructureSchema.index({ course: 1, level: 1, year: 1, academicYear: 1, category: 1, semester: 1 });
 feeStructureSchema.index({ academicYear: 1 });
 
 module.exports = mongoose.model('FeeStructure', feeStructureSchema);

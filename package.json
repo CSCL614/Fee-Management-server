@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "node --watch app.js",
     "start": "node app.js",
+    "test": "node --test testSuite.js",
     "seed": "node seed/seedData.js"
   },
   "dependencies": {

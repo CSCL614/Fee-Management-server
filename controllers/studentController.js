@@ -1,4 +1,5 @@
 const Student = require('../models/Student');
+const Course = require('../models/Course');
 const FeeDemand = require('../models/FeeDemand');
 const FeeStructure = require('../models/FeeStructure');
 const Payment = require('../models/Payment');
@@ -9,7 +10,7 @@ const { createAuditLog, generateId } = require('../utils/helpers');
 // @route   GET /api/students
 exports.getStudents = async (req, res) => {
   try {
-    const { search, level, course, year, academicYear, status, page = 1, limit = 20 } = req.query;
+    const { search, level, course, batch, year, academicYear, status, page = 1, limit = 20 } = req.query;
 
     const filter = {};
 
@@ -20,12 +21,15 @@ exports.getStudents = async (req, res) => {
         { studentId: searchRegex },
         { admissionNo: searchRegex },
         { phone: searchRegex },
-        { email: searchRegex }
+        { email: searchRegex },
+        { batch: searchRegex },
+        { course: searchRegex }
       ];
     }
 
     if (level) filter.level = level;
     if (course) filter.course = course;
+    if (batch) filter.batch = new RegExp(batch, 'i');
     if (year) filter.currentYear = year;
     if (academicYear) filter.currentAcademicYear = academicYear;
     if (status) filter.status = status;
@@ -92,7 +96,9 @@ exports.searchStudents = async (req, res) => {
         { studentId: searchRegex },
         { admissionNo: searchRegex },
         { phone: searchRegex },
-        { email: searchRegex }
+        { email: searchRegex },
+        { batch: searchRegex },
+        { course: searchRegex }
       ]
     }).limit(10);
 
@@ -107,6 +113,7 @@ exports.searchStudents = async (req, res) => {
             name: student.name,
             course: student.course,
             level: student.level,
+            batch: student.batch,
             currentYear: student.currentYear,
             totalPending: summary.overall.totalPending,
             feeStatus: summary.overall.status
@@ -119,6 +126,7 @@ exports.searchStudents = async (req, res) => {
             name: student.name,
             course: student.course,
             level: student.level,
+            batch: student.batch,
             currentYear: student.currentYear,
             totalPending: 0,
             feeStatus: 'No Demand'
@@ -170,10 +178,48 @@ exports.getStudent = async (req, res) => {
 // @route   POST /api/students
 exports.createStudent = async (req, res) => {
   try {
-    const { admissionNo, name, course, level, currentYear, currentAcademicYear, email, phone, fatherName, address, dateOfBirth, gender } = req.body;
+    const {
+      admissionNo,
+      name,
+      degree,
+      specialization,
+      courseId,
+      course,
+      level,
+      currentYear,
+      currentAcademicYear,
+      batch: customBatch,
+      email,
+      phone,
+      fatherName,
+      address,
+      dateOfBirth,
+      gender
+    } = req.body;
+
+    // Validate required fields
+    if (!admissionNo || !admissionNo.trim()) {
+      return res.status(400).json({ success: false, message: 'Admission number is required' });
+    }
+    if (!name || !name.trim()) {
+      return res.status(400).json({ success: false, message: 'Student name is required' });
+    }
+    if (!degree || !degree.trim()) {
+      return res.status(400).json({ success: false, message: 'Degree is required' });
+    }
+    if (!specialization || !specialization.trim()) {
+      return res.status(400).json({ success: false, message: 'Specialization is required' });
+    }
+    if (!currentYear || !currentYear.trim()) {
+      return res.status(400).json({ success: false, message: 'Year of study is required' });
+    }
+    if (!currentAcademicYear || !currentAcademicYear.trim()) {
+      return res.status(400).json({ success: false, message: 'Academic year is required' });
+    }
 
     // Check duplicate admission number
-    const existing = await Student.findOne({ admissionNo });
+    const trimmedAdm = admissionNo.trim();
+    const existing = await Student.findOne({ admissionNo: trimmedAdm });
     if (existing) {
       return res.status(400).json({
         success: false,
@@ -181,16 +227,75 @@ exports.createStudent = async (req, res) => {
       });
     }
 
+    // Lookup course from Course model
+    let courseDoc = null;
+    if (courseId) {
+      courseDoc = await Course.findById(courseId);
+    }
+    if (!courseDoc) {
+      courseDoc = await Course.findOne({
+        degree: degree.trim(),
+        specialization: specialization.trim()
+      });
+    }
+
+    // Course duration & level validation
+    const duration = courseDoc ? courseDoc.duration : (degree.trim() === 'M.Sc' ? 2 : 3);
+    const derivedLevel = courseDoc ? courseDoc.level : (degree.trim() === 'M.Sc' ? 'PG' : 'UG');
+    const courseDisplayName = course || (courseDoc ? courseDoc.courseName : `${degree.trim()} ${specialization.trim()}`);
+
+    // Backend validation of course duration and year of study
+    const allowedYearsMap = {
+      1: ['1st Year'],
+      2: ['1st Year', '2nd Year'],
+      3: ['1st Year', '2nd Year', '3rd Year'],
+      4: ['1st Year', '2nd Year', '3rd Year', '4th Year'],
+      5: ['1st Year', '2nd Year', '3rd Year', '4th Year', '5th Year'],
+      6: ['1st Year', '2nd Year', '3rd Year', '4th Year', '5th Year', '6th Year']
+    };
+    const allowedYears = allowedYearsMap[duration] || ['1st Year', '2nd Year', '3rd Year'];
+
+    if (!allowedYears.includes(currentYear)) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid year of study "${currentYear}". ${degree} ${specialization} is a ${duration}-year course (Allowed: ${allowedYears.join(', ')})`
+      });
+    }
+
+    // Calculate Batch
+    let startYear;
+    if (trimmedAdm) {
+      const match = trimmedAdm.match(/\d{4}/);
+      if (match) startYear = parseInt(match[0], 10);
+    }
+    if (!startYear && currentAcademicYear) {
+      const parts = currentAcademicYear.split('-');
+      if (parts[0]) startYear = parseInt(parts[0], 10);
+    }
+    if (!startYear) startYear = new Date().getFullYear();
+
+    const batchStartYear = startYear;
+    const batchEndYear = startYear + duration;
+    const calculatedBatch = `${batchStartYear}–${batchEndYear}`;
+    const finalBatch = customBatch || calculatedBatch;
+
     const studentId = await generateId(Student, 'STU', 'studentId');
 
     const student = await Student.create({
       studentId,
-      admissionNo,
-      name,
-      course,
-      level,
+      admissionNo: trimmedAdm,
+      name: name.trim(),
+      degree: degree.trim(),
+      specialization: specialization.trim(),
+      courseId: courseDoc ? courseDoc._id : undefined,
+      duration,
+      course: courseDisplayName,
+      level: derivedLevel,
       currentYear,
       currentAcademicYear,
+      batchStartYear,
+      batchEndYear,
+      batch: finalBatch,
       enrollmentHistory: [{
         year: currentYear,
         academicYear: currentAcademicYear,
@@ -205,28 +310,41 @@ exports.createStudent = async (req, res) => {
     });
 
     // Auto-create fee demand from fee structure if available
+    const escapeRegex = (s) => (s ? s.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&') : '');
+    const courseRegexList = [
+      new RegExp(`^${escapeRegex(courseDisplayName)}$`, 'i'),
+      new RegExp(`^${escapeRegex(specialization.trim())}$`, 'i'),
+      new RegExp(`^${escapeRegex(degree.trim())}\\s*[-—]?\\s*${escapeRegex(specialization.trim())}$`, 'i'),
+      new RegExp(`^${escapeRegex(degree.trim())}$`, 'i')
+    ];
+
     const feeStructures = await FeeStructure.find({
-      course,
-      level,
-      year: currentYear,
-      academicYear: currentAcademicYear,
+      course: { $in: courseRegexList },
+      year: new RegExp(`^${escapeRegex(currentYear.trim())}$`, 'i'),
+      academicYear: currentAcademicYear.trim(),
       status: 'active'
     });
 
     if (feeStructures.length > 0) {
+      const now = new Date();
       const categories = feeStructures.map(fs => ({
         category: fs.category,
-        amount: fs.amount
+        amount: fs.amount,
+        frequency: fs.frequency || 'ANNUAL',
+        semester: fs.semester || null,
+        activationDate: fs.activationDate || null,
+        dueDate: fs.dueDate || null,
+        status: (fs.activationDate && new Date(fs.activationDate) > now) ? 'upcoming' : 'active'
       }));
       const totalDemand = categories.reduce((sum, c) => sum + c.amount, 0);
 
       await FeeDemand.create({
         student: student._id,
         studentId: student.studentId,
-        academicYear: currentAcademicYear,
-        year: currentYear,
-        course,
-        level,
+        academicYear: currentAcademicYear.trim(),
+        year: currentYear.trim(),
+        course: courseDisplayName,
+        level: derivedLevel,
         categories,
         totalDemand,
         createdBy: req.user._id
@@ -240,8 +358,19 @@ exports.createStudent = async (req, res) => {
       action: 'Student Created',
       entity: 'Student',
       entityId: student.studentId,
-      description: `Created student ${name} (${admissionNo})`,
-      newValue: { studentId, admissionNo, name, course, level, currentYear, currentAcademicYear },
+      description: `Created student ${student.name} (${trimmedAdm}) - ${student.course}`,
+      newValue: {
+        studentId,
+        admissionNo: trimmedAdm,
+        name: student.name,
+        degree: student.degree,
+        specialization: student.specialization,
+        course: student.course,
+        level: student.level,
+        batch: student.batch,
+        currentYear,
+        currentAcademicYear
+      },
       ipAddress: req.ip
     });
 
@@ -427,9 +556,21 @@ exports.getFeeLedger = async (req, res) => {
 // @route   GET /api/students/courses
 exports.getCourses = async (req, res) => {
   try {
-    const courses = await Student.distinct('course');
+    const activeCourses = await Course.find({ status: 'active' });
+    const courseNamesFromDB = activeCourses.map(c => c.courseName || `${c.degree} ${c.specialization}`);
+    const studentCourses = await Student.distinct('course');
+    const combinedCourses = Array.from(new Set([...courseNamesFromDB, ...studentCourses])).filter(Boolean).sort();
+
     const levels = await Student.distinct('level');
-    res.json({ success: true, data: { courses, levels } });
+    const batches = await Student.distinct('batch');
+    res.json({
+      success: true,
+      data: {
+        courses: combinedCourses,
+        levels: Array.from(new Set(['UG', 'PG', ...levels])).filter(Boolean),
+        batches: batches.filter(Boolean).sort()
+      }
+    });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Server error' });
   }

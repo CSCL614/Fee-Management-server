@@ -22,6 +22,21 @@ const studentSchema = new mongoose.Schema({
     required: [true, 'Course is required'],
     trim: true
   },
+  degree: {
+    type: String,
+    trim: true
+  },
+  specialization: {
+    type: String,
+    trim: true
+  },
+  courseId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Course'
+  },
+  duration: {
+    type: Number
+  },
   level: {
     type: String,
     enum: ['UG', 'PG'],
@@ -34,6 +49,16 @@ const studentSchema = new mongoose.Schema({
   currentAcademicYear: {
     type: String,
     required: [true, 'Current academic year is required']
+  },
+  batchStartYear: {
+    type: Number
+  },
+  batchEndYear: {
+    type: Number
+  },
+  batch: {
+    type: String,
+    trim: true
   },
   // History of all academic years the student has been enrolled in
   enrollmentHistory: [{
@@ -79,10 +104,33 @@ const studentSchema = new mongoose.Schema({
   timestamps: true
 });
 
+studentSchema.pre('validate', function(next) {
+  if (!this.batch || !this.batchStartYear || !this.batchEndYear) {
+    let startYear;
+    if (this.admissionNo) {
+      const match = this.admissionNo.match(/\d{4}/);
+      if (match) startYear = parseInt(match[0]);
+    }
+    if (!startYear && this.currentAcademicYear) {
+      const parts = this.currentAcademicYear.split('-');
+      if (parts[0]) startYear = parseInt(parts[0]);
+    }
+    if (!startYear) startYear = new Date().getFullYear();
+
+    const duration = this.duration || (this.level === 'PG' ? 2 : 3);
+    this.batchStartYear = startYear;
+    this.batchEndYear = startYear + duration;
+    this.batch = `${this.batchStartYear}-${this.batchEndYear}`;
+  }
+  next();
+});
+
 studentSchema.index({ course: 1 });
 studentSchema.index({ level: 1 });
 studentSchema.index({ status: 1 });
 studentSchema.index({ currentAcademicYear: 1 });
+studentSchema.index({ batch: 1 });
+studentSchema.index({ course: 1, batch: 1 });
 studentSchema.index({ name: 'text' });
 
 module.exports = mongoose.model('Student', studentSchema);
