@@ -59,6 +59,9 @@ const feeDemandSchema = new mongoose.Schema({
 });
 
 feeDemandSchema.index({ student: 1, academicYear: 1 });
+feeDemandSchema.index({ student: 1, status: 1 });
+feeDemandSchema.index({ status: 1, totalDemand: 1 });
+feeDemandSchema.index({ status: 1, 'categories.activationDate': 1 });
 feeDemandSchema.index({ studentId: 1 });
 feeDemandSchema.index({ academicYear: 1 });
 feeDemandSchema.index({ course: 1 });

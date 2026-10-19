@@ -2,8 +2,7 @@ const Student = require('../models/Student');
 const Course = require('../models/Course');
 const FeeDemand = require('../models/FeeDemand');
 const FeeStructure = require('../models/FeeStructure');
-const Payment = require('../models/Payment');
-const { calculateFeeSummary, generateFeeLedger } = require('../utils/feeCalculator');
+const { calculateFeeSummary, calculateBatchFeeSummaries, generateFeeLedger } = require('../utils/feeCalculator');
 const { createAuditLog, generateId } = require('../utils/helpers');
 
 // @desc    Get all students with filters
@@ -34,44 +33,41 @@ exports.getStudents = async (req, res) => {
     if (academicYear) filter.currentAcademicYear = academicYear;
     if (status) filter.status = status;
 
-    const total = await Student.countDocuments(filter);
-    const students = await Student.find(filter)
-      .sort({ createdAt: -1 })
-      .skip((page - 1) * limit)
-      .limit(parseInt(limit));
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
 
-    // Calculate fee summary for each student
-    const studentsWithFees = await Promise.all(
-      students.map(async (student) => {
-        try {
-          const summary = await calculateFeeSummary(student.studentId);
-          return {
-            ...student.toObject(),
-            totalFee: summary.overall.totalFee,
-            totalPaid: summary.overall.totalPaid,
-            totalPending: summary.overall.totalPending,
-            feeStatus: summary.overall.status
-          };
-        } catch {
-          return {
-            ...student.toObject(),
-            totalFee: 0,
-            totalPaid: 0,
-            totalPending: 0,
-            feeStatus: 'No Demand'
-          };
-        }
-      })
-    );
+    // Fetch count and paginated students concurrently
+    const [total, students] = await Promise.all([
+      Student.countDocuments(filter),
+      Student.find(filter)
+        .sort({ createdAt: -1 })
+        .skip((pageNum - 1) * limitNum)
+        .limit(limitNum)
+        .lean()
+    ]);
+
+    // Batch calculate fee summary for all students in 2 queries total
+    const summaryMap = await calculateBatchFeeSummaries(students);
+
+    const studentsWithFees = students.map((student) => {
+      const summary = summaryMap.get(student._id.toString());
+      return {
+        ...student,
+        totalFee: summary?.overall?.totalFee || 0,
+        totalPaid: summary?.overall?.totalPaid || 0,
+        totalPending: summary?.overall?.totalPending || 0,
+        feeStatus: summary?.overall?.status || 'No Demand'
+      };
+    });
 
     res.json({
       success: true,
       data: studentsWithFees,
       pagination: {
         total,
-        page: parseInt(page),
-        pages: Math.ceil(total / limit),
-        limit: parseInt(limit)
+        page: pageNum,
+        pages: Math.ceil(total / limitNum),
+        limit: limitNum
       }
     });
   } catch (error) {
@@ -100,40 +96,26 @@ exports.searchStudents = async (req, res) => {
         { batch: searchRegex },
         { course: searchRegex }
       ]
-    }).limit(10);
+    }).limit(10).lean();
 
-    const results = await Promise.all(
-      students.map(async (student) => {
-        try {
-          const summary = await calculateFeeSummary(student.studentId);
-          return {
-            _id: student._id,
-            studentId: student.studentId,
-            admissionNo: student.admissionNo,
-            name: student.name,
-            course: student.course,
-            level: student.level,
-            batch: student.batch,
-            currentYear: student.currentYear,
-            totalPending: summary.overall.totalPending,
-            feeStatus: summary.overall.status
-          };
-        } catch {
-          return {
-            _id: student._id,
-            studentId: student.studentId,
-            admissionNo: student.admissionNo,
-            name: student.name,
-            course: student.course,
-            level: student.level,
-            batch: student.batch,
-            currentYear: student.currentYear,
-            totalPending: 0,
-            feeStatus: 'No Demand'
-          };
-        }
-      })
-    );
+    // Batch calculate fee summaries for all search matches in 2 queries
+    const summaryMap = await calculateBatchFeeSummaries(students);
+
+    const results = students.map((student) => {
+      const summary = summaryMap.get(student._id.toString());
+      return {
+        _id: student._id,
+        studentId: student.studentId,
+        admissionNo: student.admissionNo,
+        name: student.name,
+        course: student.course,
+        level: student.level,
+        batch: student.batch,
+        currentYear: student.currentYear,
+        totalPending: summary?.overall?.totalPending || 0,
+        feeStatus: summary?.overall?.status || 'No Demand'
+      };
+    });
 
     res.json({ success: true, data: results });
   } catch (error) {
@@ -151,19 +133,22 @@ exports.getStudent = async (req, res) => {
         { studentId: req.params.id },
         { _id: req.params.id.match(/^[0-9a-fA-F]{24}$/) ? req.params.id : undefined }
       ].filter(Boolean)
-    });
+    }).lean();
 
     if (!student) {
       return res.status(404).json({ success: false, message: 'Student not found' });
     }
 
-    const feeSummary = await calculateFeeSummary(student.studentId);
-    const feeLedger = await generateFeeLedger(student.studentId);
+    // Run fee summary and fee ledger concurrently
+    const [feeSummary, feeLedger] = await Promise.all([
+      calculateFeeSummary(student.studentId),
+      generateFeeLedger(student.studentId)
+    ]);
 
     res.json({
       success: true,
       data: {
-        student: student.toObject(),
+        student,
         feeSummary,
         feeLedger
       }

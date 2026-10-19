@@ -128,6 +128,9 @@ studentSchema.pre('validate', function(next) {
 studentSchema.index({ course: 1 });
 studentSchema.index({ level: 1 });
 studentSchema.index({ status: 1 });
+studentSchema.index({ status: 1, createdAt: -1 });
+studentSchema.index({ status: 1, course: 1, level: 1 });
+studentSchema.index({ status: 1, currentAcademicYear: 1 });
 studentSchema.index({ currentAcademicYear: 1 });
 studentSchema.index({ batch: 1 });
 studentSchema.index({ course: 1, batch: 1 });

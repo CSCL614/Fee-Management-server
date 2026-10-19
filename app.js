@@ -4,18 +4,23 @@ const cors = require('cors');
 const morgan = require('morgan');
 const cookieParser = require('cookie-parser');
 const connectDB = require('./config/db');
+const timingMiddleware = require('./middleware/timing');
 
 const app = express();
+
+// Performance Diagnostics & Server-Timing Headers
+app.use(timingMiddleware);
 
 // Connect DB Middleware
 app.use(async (req, res, next) => {
   try {
     if (process.env.MONGODB_URI) {
-      await connectDB();
+      const { connectTimeMs } = await connectDB();
+      res.locals.dbConnMs = connectTimeMs;
     }
     next();
   } catch (err) {
-    console.error('DB Connection Failed:', err);
+    console.error('DB Connection Failed:', err.message);
     res.status(500).json({ success: false, message: 'Database connection error. Please verify MONGODB_URI on Vercel.' });
   }
 });

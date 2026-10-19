@@ -120,6 +120,10 @@ paymentSchema.index({ studentId: 1 });
 paymentSchema.index({ academicYear: 1 });
 paymentSchema.index({ paymentDate: 1 });
 paymentSchema.index({ status: 1 });
+paymentSchema.index({ status: 1, paymentDate: -1 });
+paymentSchema.index({ status: 1, paymentDate: 1, amountPaid: 1 });
+paymentSchema.index({ student: 1, status: 1, paymentDate: 1 });
+paymentSchema.index({ paymentDate: -1, createdAt: -1 });
 paymentSchema.index({ student: 1, academicYear: 1, status: 1 });
 
 module.exports = mongoose.model('Payment', paymentSchema);

@@ -6,7 +6,7 @@ const FeeStructure = require('../models/FeeStructure');
 const FeeDemand = require('../models/FeeDemand');
 const User = require('../models/User');
 const AuditLog = require('../models/AuditLog');
-const { calculateFeeSummary } = require('../utils/feeCalculator');
+const { calculateFeeSummary, calculateBatchFeeSummaries } = require('../utils/feeCalculator');
 
 // @desc    Full Excel export (all data)
 // @route   GET /api/exports/excel
@@ -102,9 +102,10 @@ exports.exportFullExcel = async (req, res) => {
       { header: 'Status', key: 'status', width: 12 }
     ];
 
+    const summaryMap = await calculateBatchFeeSummaries(students);
     for (const student of students) {
-      try {
-        const summary = await calculateFeeSummary(student.studentId);
+      const summary = summaryMap.get(student._id.toString());
+      if (summary) {
         for (const ys of summary.yearSummaries) {
           summarySheet.addRow({
             studentId: student.studentId,
@@ -120,7 +121,7 @@ exports.exportFullExcel = async (req, res) => {
             status: ys.status
           });
         }
-      } catch { /* skip */ }
+      }
     }
     styleHeader(summarySheet);
 
@@ -273,24 +274,23 @@ exports.exportFilteredExcel = async (req, res) => {
       if (course) studentFilter.course = course;
       if (level) studentFilter.level = level;
 
-      const students = await Student.find(studentFilter);
+      const students = await Student.find(studentFilter).lean();
+      const summaryMap = await calculateBatchFeeSummaries(students);
       for (const student of students) {
-        try {
-          const summary = await calculateFeeSummary(student.studentId);
-          if (summary.overall.totalPending > 0) {
-            sheet.addRow({
-              studentId: student.studentId,
-              name: student.name,
-              course: student.course,
-              level: student.level,
-              currentYear: student.currentYear,
-              totalFee: summary.overall.totalFee,
-              totalPaid: summary.overall.totalPaid,
-              totalPending: summary.overall.totalPending,
-              status: summary.overall.status
-            });
-          }
-        } catch { /* skip */ }
+        const summary = summaryMap.get(student._id.toString());
+        if (summary && summary.overall.totalPending > 0) {
+          sheet.addRow({
+            studentId: student.studentId,
+            name: student.name,
+            course: student.course,
+            level: student.level,
+            currentYear: student.currentYear,
+            totalFee: summary.overall.totalFee,
+            totalPaid: summary.overall.totalPaid,
+            totalPending: summary.overall.totalPending,
+            status: summary.overall.status
+          });
+        }
       }
       styleHeader(sheet);
     } else if (type === 'students') {

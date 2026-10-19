@@ -1,9 +1,14 @@
 {
   "version": 2,
+  "regions": ["bom1"],
   "builds": [
     {
       "src": "app.js",
-      "use": "@vercel/node"
+      "use": "@vercel/node",
+      "config": {
+        "memory": 1024,
+        "maxDuration": 15
+      }
     }
   ],
   "routes": [

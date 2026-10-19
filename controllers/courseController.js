@@ -10,11 +10,20 @@ const INITIAL_COURSES = [
   { degree: 'M.Sc', specialization: 'Organic Chemistry', duration: 2, level: 'PG' }
 ];
 
-// Helper to seed initial courses if missing
+// Helper to seed initial courses if missing (runs at most once per process)
+let initialCoursesEnsured = false;
+
 const ensureInitialCourses = async () => {
+  if (initialCoursesEnsured) return;
   try {
+    const existingCount = await Course.countDocuments();
+    if (existingCount >= INITIAL_COURSES.length) {
+      initialCoursesEnsured = true;
+      return;
+    }
+
     for (const item of INITIAL_COURSES) {
-      const existing = await Course.findOne({ degree: item.degree, specialization: item.specialization });
+      const existing = await Course.findOne({ degree: item.degree, specialization: item.specialization }).lean();
       if (!existing) {
         const courseId = await generateId(Course, 'CRS', 'courseId');
         await Course.create({
@@ -28,6 +37,7 @@ const ensureInitialCourses = async () => {
         });
       }
     }
+    initialCoursesEnsured = true;
   } catch (error) {
     console.error('Error ensuring initial courses:', error);
   }
@@ -47,10 +57,10 @@ exports.getCourses = async (req, res) => {
     if (status) filter.status = status;
     else filter.status = 'active';
 
-    const courses = await Course.find(filter).sort({ degree: 1, specialization: 1 });
+    const courses = await Course.find(filter).sort({ degree: 1, specialization: 1 }).lean();
 
     // Distinct degrees for filtering dropdowns
-    const allActiveCourses = await Course.find({ status: 'active' });
+    const allActiveCourses = await Course.find({ status: 'active' }).select('degree').lean();
     const distinctDegrees = Array.from(new Set(allActiveCourses.map(c => c.degree))).sort();
 
     res.json({
