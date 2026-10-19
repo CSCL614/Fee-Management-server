@@ -3,7 +3,8 @@ const router = express.Router();
 const { protect, authorize } = require('../middleware/auth');
 const {
   getStudents, searchStudents, getStudent, createStudent,
-  updateStudent, promoteStudent, getFeeSummary, getFeeLedger, getCourses
+  updateStudent, updateStudentStatus, deleteStudent,
+  promoteStudent, getFeeSummary, getFeeLedger, getCourses
 } = require('../controllers/studentController');
 
 router.get('/courses', protect, getCourses);
@@ -14,6 +15,8 @@ router.get('/:id/fee-summary', protect, getFeeSummary);
 router.get('/:id/ledger', protect, getFeeLedger);
 router.post('/', protect, authorize('admin'), createStudent);
 router.put('/:id', protect, authorize('admin'), updateStudent);
+router.patch('/:id/status', protect, authorize('admin'), updateStudentStatus);
+router.delete('/:id', protect, authorize('admin'), deleteStudent);
 router.post('/:id/promote', protect, authorize('admin'), promoteStudent);
 
 module.exports = router;

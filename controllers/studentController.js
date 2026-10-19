@@ -389,55 +389,226 @@ exports.createStudent = async (req, res) => {
 // @route   PUT /api/students/:id
 exports.updateStudent = async (req, res) => {
   try {
-    const student = await Student.findOne({ studentId: req.params.id });
+    const student = await Student.findOne({
+      $or: [
+        { studentId: req.params.id },
+        { _id: req.params.id.match(/^[0-9a-fA-F]{24}$/) ? req.params.id : undefined }
+      ].filter(Boolean)
+    });
     if (!student) {
       return res.status(404).json({ success: false, message: 'Student not found' });
     }
 
     const oldValue = student.toObject();
 
-    // Prevent duplicate admission number
-    if (req.body.admissionNo && req.body.admissionNo !== student.admissionNo) {
-      const existing = await Student.findOne({ admissionNo: req.body.admissionNo });
+    // Prevent duplicate admission number (exclude self)
+    if (req.body.admissionNo && req.body.admissionNo.trim() !== student.admissionNo) {
+      const existing = await Student.findOne({
+        admissionNo: req.body.admissionNo.trim(),
+        _id: { $ne: student._id }
+      });
       if (existing) {
         return res.status(400).json({
           success: false,
           message: 'A student with this admission number already exists'
         });
       }
+      student.admissionNo = req.body.admissionNo.trim();
     }
 
-    const allowedFields = ['name', 'admissionNo', 'email', 'phone', 'fatherName', 'address', 'dateOfBirth', 'gender', 'status'];
+    const allowedFields = [
+      'name', 'email', 'phone', 'fatherName', 'address', 'dateOfBirth', 'gender',
+      'status', 'degree', 'specialization', 'course', 'courseId', 'duration',
+      'level', 'currentYear', 'currentAcademicYear', 'batch'
+    ];
+
     for (const field of allowedFields) {
       if (req.body[field] !== undefined) {
-        student[field] = req.body[field];
+        if (typeof req.body[field] === 'string') {
+          student[field] = req.body[field].trim();
+        } else {
+          student[field] = req.body[field];
+        }
       }
     }
 
     await student.save();
 
+    // If course or level changed, synchronize active fee demands course/level for consistency
+    if (req.body.course || req.body.level) {
+      await FeeDemand.updateMany(
+        { $or: [{ student: student._id }, { studentId: student.studentId }] },
+        {
+          $set: {
+            ...(req.body.course && { course: student.course }),
+            ...(req.body.level && { level: student.level })
+          }
+        }
+      );
+    }
+
     await createAuditLog({
       user: req.user._id,
       userName: req.user.name,
       userRole: req.user.role,
-      action: 'Student Updated',
+      action: 'Student Profile Updated',
       entity: 'Student',
       entityId: student.studentId,
-      description: `Updated student ${student.name}`,
-      oldValue: { name: oldValue.name, email: oldValue.email, phone: oldValue.phone, status: oldValue.status },
-      newValue: { name: student.name, email: student.email, phone: student.phone, status: student.status },
-      reason: req.body.reason || 'Profile update',
+      description: `Updated profile for student ${student.name} (${student.admissionNo || student.studentId})`,
+      oldValue: {
+        name: oldValue.name,
+        admissionNo: oldValue.admissionNo,
+        course: oldValue.course,
+        level: oldValue.level,
+        currentYear: oldValue.currentYear,
+        status: oldValue.status,
+        email: oldValue.email,
+        phone: oldValue.phone
+      },
+      newValue: {
+        name: student.name,
+        admissionNo: student.admissionNo,
+        course: student.course,
+        level: student.level,
+        currentYear: student.currentYear,
+        status: student.status,
+        email: student.email,
+        phone: student.phone
+      },
+      reason: req.body.reason || 'Admin profile update',
       ipAddress: req.ip
     });
 
     res.json({
       success: true,
       data: student,
-      message: 'Student updated successfully'
+      message: 'Student profile updated successfully'
     });
   } catch (error) {
     console.error('Update student error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
+    res.status(500).json({ success: false, message: error.message || 'Server error' });
+  }
+};
+
+// @desc    Change student status (e.g. Active, Inactive, Graduated, Discontinued, Transferred)
+// @route   PATCH /api/students/:id/status
+exports.updateStudentStatus = async (req, res) => {
+  try {
+    const { status, reason } = req.body;
+    const validStatuses = ['Active', 'Inactive', 'Graduated', 'Discontinued', 'Transferred'];
+    if (!status || !validStatuses.includes(status)) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid status. Allowed statuses: ${validStatuses.join(', ')}`
+      });
+    }
+
+    const student = await Student.findOne({
+      $or: [
+        { studentId: req.params.id },
+        { _id: req.params.id.match(/^[0-9a-fA-F]{24}$/) ? req.params.id : undefined }
+      ].filter(Boolean)
+    });
+
+    if (!student) {
+      return res.status(404).json({ success: false, message: 'Student not found' });
+    }
+
+    const oldStatus = student.status;
+    student.status = status;
+    await student.save();
+
+    await createAuditLog({
+      user: req.user._id,
+      userName: req.user.name,
+      userRole: req.user.role,
+      action: status === 'Inactive' ? 'Student Deactivated' : (status === 'Active' ? 'Student Reactivated' : 'Student Status Changed'),
+      entity: 'Student',
+      entityId: student.studentId,
+      description: `Changed status of ${student.name} (${student.admissionNo || student.studentId}) from "${oldStatus}" to "${status}"`,
+      oldValue: { status: oldStatus },
+      newValue: { status },
+      reason: reason || (status === 'Inactive' ? 'Student account deactivated by administrator' : `Student status set to ${status}`),
+      ipAddress: req.ip
+    });
+
+    res.json({
+      success: true,
+      data: student,
+      message: `Student status successfully changed to "${status}"`
+    });
+  } catch (error) {
+    console.error('Update student status error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Server error' });
+  }
+};
+
+// @desc    Delete student or enforce safe deactivation if payments exist
+// @route   DELETE /api/students/:id
+exports.deleteStudent = async (req, res) => {
+  try {
+    const student = await Student.findOne({
+      $or: [
+        { studentId: req.params.id },
+        { _id: req.params.id.match(/^[0-9a-fA-F]{24}$/) ? req.params.id : undefined }
+      ].filter(Boolean)
+    });
+
+    if (!student) {
+      return res.status(404).json({ success: false, message: 'Student not found' });
+    }
+
+    // Check if student has payment records
+    const paymentCount = await Payment.countDocuments({
+      $or: [
+        { student: student._id },
+        { studentId: student.studentId }
+      ]
+    });
+
+    if (paymentCount > 0) {
+      return res.status(400).json({
+        success: false,
+        hasPayments: true,
+        paymentCount,
+        message: `This student has ${paymentCount} recorded payment transaction(s). To maintain financial ledger accuracy and audit compliance, students with payment history cannot be permanently deleted. You can Deactivate this student instead to disable their account and archive their record.`
+      });
+    }
+
+    const reason = req.body?.reason || req.query?.reason || 'Student record deleted by administrator';
+
+    // Delete associated unbilled fee demands
+    await FeeDemand.deleteMany({
+      $or: [
+        { student: student._id },
+        { studentId: student.studentId }
+      ]
+    });
+
+    // Delete student document
+    await Student.deleteOne({ _id: student._id });
+
+    // Create Audit Log
+    await createAuditLog({
+      user: req.user._id,
+      userName: req.user.name,
+      userRole: req.user.role,
+      action: 'Student Deleted',
+      entity: 'Student',
+      entityId: student.studentId,
+      description: `Permanently deleted student ${student.name} (${student.admissionNo || student.studentId}) with 0 payments`,
+      oldValue: student.toObject(),
+      reason,
+      ipAddress: req.ip
+    });
+
+    res.json({
+      success: true,
+      message: `Student ${student.name} (${student.admissionNo || student.studentId}) deleted successfully`
+    });
+  } catch (error) {
+    console.error('Delete student error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Server error' });
   }
 };
 
