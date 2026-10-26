@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const FeeCategory = require('../models/FeeCategory');
 const FeeStructure = require('../models/FeeStructure');
 const FeeDemand = require('../models/FeeDemand');
@@ -23,6 +24,9 @@ exports.getCategories = async (req, res) => {
 // @route   POST /api/fees/categories
 exports.createCategory = async (req, res) => {
   try {
+    if (req.user?.role !== 'admin') {
+      return res.status(403).json({ success: false, message: 'Fee structure and category configuration is restricted to Admin only.' });
+    }
     const { name, description } = req.body;
 
     const existing = await FeeCategory.findOne({ name });
@@ -54,6 +58,9 @@ exports.createCategory = async (req, res) => {
 // @route   PUT /api/fees/categories/:id
 exports.updateCategory = async (req, res) => {
   try {
+    if (req.user?.role !== 'admin') {
+      return res.status(403).json({ success: false, message: 'Fee structure and category configuration is restricted to Admin only.' });
+    }
     const category = await FeeCategory.findById(req.params.id);
     if (!category) {
       return res.status(404).json({ success: false, message: 'Category not found' });
@@ -213,6 +220,9 @@ async function syncStructureWithStudents(course, level, year, academicYear, admi
 // @route   POST /api/fees/structures
 exports.createStructure = async (req, res) => {
   try {
+    if (req.user?.role !== 'admin') {
+      return res.status(403).json({ success: false, message: 'Fee structure configuration is restricted to Admin only.' });
+    }
     const {
       course,
       level,
@@ -316,7 +326,13 @@ exports.createStructure = async (req, res) => {
 // @route   PUT /api/fees/structures/:id
 exports.updateStructure = async (req, res) => {
   try {
-    const structure = await FeeStructure.findOne({ feeId: req.params.id });
+    if (req.user?.role !== 'admin') {
+      return res.status(403).json({ success: false, message: 'Fee structure modification is restricted to Admin only.' });
+    }
+    const isObjectId = mongoose.Types.ObjectId.isValid(req.params.id);
+    const structure = await FeeStructure.findOne(
+      isObjectId ? { $or: [{ feeId: req.params.id }, { _id: req.params.id }] } : { feeId: req.params.id }
+    );
     if (!structure) {
       return res.status(404).json({ success: false, message: 'Fee structure not found' });
     }
@@ -348,7 +364,8 @@ exports.updateStructure = async (req, res) => {
 
     res.json({ success: true, data: structure, message: 'Fee structure updated and synced' });
   } catch (error) {
-    res.status(500).json({ success: false, message: 'Server error' });
+    console.error('Update fee structure error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Server error' });
   }
 };
 
@@ -356,7 +373,13 @@ exports.updateStructure = async (req, res) => {
 // @route   DELETE /api/fees/structures/:id
 exports.deleteStructure = async (req, res) => {
   try {
-    const structure = await FeeStructure.findOne({ feeId: req.params.id });
+    if (req.user?.role !== 'admin') {
+      return res.status(403).json({ success: false, message: 'Fee structure deletion is restricted to Admin only.' });
+    }
+    const isObjectId = mongoose.Types.ObjectId.isValid(req.params.id);
+    const structure = await FeeStructure.findOne(
+      isObjectId ? { $or: [{ feeId: req.params.id }, { _id: req.params.id }] } : { feeId: req.params.id }
+    );
     if (!structure) {
       return res.status(404).json({ success: false, message: 'Fee structure not found' });
     }
@@ -383,7 +406,8 @@ exports.deleteStructure = async (req, res) => {
 
     res.json({ success: true, message: 'Fee structure deleted and synced' });
   } catch (error) {
-    res.status(500).json({ success: false, message: 'Server error' });
+    console.error('Delete fee structure error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Server error' });
   }
 };
 

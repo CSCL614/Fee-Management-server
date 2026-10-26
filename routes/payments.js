@@ -3,9 +3,10 @@ const router = express.Router();
 const { protect, authorize } = require('../middleware/auth');
 const {
   recordPayment, getPayments, getPayment,
-  editPayment, cancelPayment, getTodayCollection
+  editPayment, cancelPayment, getTodayCollection, getMonthlyCollection
 } = require('../controllers/paymentController');
 
+router.get('/monthly', protect, getMonthlyCollection);
 router.get('/today', protect, getTodayCollection);
 router.get('/', protect, getPayments);
 router.get('/:id', protect, getPayment);

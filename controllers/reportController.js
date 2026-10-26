@@ -1,7 +1,11 @@
 const Payment = require('../models/Payment');
 const Student = require('../models/Student');
 const FeeDemand = require('../models/FeeDemand');
+const Course = require('../models/Course');
+const FeeCategory = require('../models/FeeCategory');
 const { calculateFeeSummary, calculateBatchFeeSummaries, computeStudentSummary } = require('../utils/feeCalculator');
+
+const escapeRegex = (s) => (s ? s.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&') : '');
 
 // @desc    Get dashboard stats
 // @route   GET /api/reports/dashboard
@@ -11,6 +15,21 @@ exports.getDashboardStats = async (req, res) => {
     today.setHours(0, 0, 0, 0);
     const tomorrow = new Date(today);
     tomorrow.setDate(tomorrow.getDate() + 1);
+
+    const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1, 0, 0, 0, 0);
+    const startOfNextMonth = new Date(today.getFullYear(), today.getMonth() + 1, 1, 0, 0, 0, 0);
+    const monthNamesFull = [
+      'January', 'February', 'March', 'April', 'May', 'June',
+      'July', 'August', 'September', 'October', 'November', 'December'
+    ];
+    const currentMonthName = monthNamesFull[today.getMonth()];
+    const currentCalendarYear = today.getFullYear();
+    const currentMonthLabel = `${currentMonthName} ${currentCalendarYear}`;
+
+    // For Yearly Fee Inflow
+    const inflowYear = parseInt(req.query.inflowYear) || currentCalendarYear;
+    const startOfInflowYear = new Date(inflowYear, 0, 1, 0, 0, 0, 0);
+    const startOfNextInflowYear = new Date(inflowYear + 1, 0, 1, 0, 0, 0, 0);
 
     const twelveMonthsAgo = new Date();
     twelveMonthsAgo.setMonth(twelveMonthsAgo.getMonth() - 11);
@@ -23,8 +42,11 @@ exports.getDashboardStats = async (req, res) => {
       feeAgg,
       collectionAgg,
       todayAgg,
+      currentMonthAgg,
+      yearlyInflowAgg,
+      distinctPaymentYears,
       recentPayments,
-      monthlyCollection,
+      monthlyCollectionLegacy,
       courseCollection,
       modeDistribution,
       candidateStudents,
@@ -45,6 +67,45 @@ exports.getDashboardStats = async (req, res) => {
       Payment.aggregate([
         { $match: { paymentDate: { $gte: today, $lt: tomorrow }, status: 'completed' } },
         { $group: { _id: null, total: { $sum: '$amountPaid' }, count: { $sum: 1 } } }
+      ]),
+
+      Payment.aggregate([
+        {
+          $match: {
+            paymentDate: { $gte: startOfMonth, $lt: startOfNextMonth },
+            status: 'completed'
+          }
+        },
+        {
+          $group: {
+            _id: null,
+            total: { $sum: '$amountPaid' },
+            count: { $sum: 1 }
+          }
+        }
+      ]),
+
+      Payment.aggregate([
+        {
+          $match: {
+            paymentDate: { $gte: startOfInflowYear, $lt: startOfNextInflowYear },
+            status: 'completed'
+          }
+        },
+        {
+          $group: {
+            _id: { $month: '$paymentDate' },
+            total: { $sum: '$amountPaid' },
+            count: { $sum: 1 }
+          }
+        },
+        { $sort: { '_id': 1 } }
+      ]),
+
+      Payment.aggregate([
+        { $match: { status: 'completed' } },
+        { $group: { _id: { $year: '$paymentDate' } } },
+        { $sort: { _id: -1 } }
       ]),
 
       Payment.find({ status: 'completed' })
@@ -118,6 +179,29 @@ exports.getDashboardStats = async (req, res) => {
     const totalCollected = collectionAgg[0]?.totalCollected || 0;
     const totalPending = Math.max(0, totalFee - totalCollected);
 
+    // Format Yearly Fee Inflow
+    const monthNamesShort = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const inflowMap = new Map();
+    for (const item of yearlyInflowAgg) {
+      inflowMap.set(item._id, item);
+    }
+    const yearlyInflow = monthNamesShort.map((mName, idx) => {
+      const monthNum = idx + 1;
+      const data = inflowMap.get(monthNum);
+      return {
+        month: mName,
+        monthName: monthNamesFull[idx],
+        fullMonth: `${monthNamesFull[idx]} ${inflowYear}`,
+        monthIndex: monthNum,
+        year: inflowYear,
+        amount: data ? data.total : 0,
+        count: data ? data.count : 0
+      };
+    });
+
+    const pyYears = distinctPaymentYears.map(p => p._id).filter(Boolean);
+    const availableInflowYears = Array.from(new Set([currentCalendarYear, currentCalendarYear - 1, currentCalendarYear - 2, ...pyYears])).sort((a, b) => b - a);
+
     // Batch calculate high pending students in 2 queries total (instead of 150-300 queries)
     const summaryMap = await calculateBatchFeeSummaries(candidateStudents);
     const highPending = [];
@@ -168,10 +252,21 @@ exports.getDashboardStats = async (req, res) => {
         totalFee,
         totalCollected,
         totalPending,
+        // Monthly Collection
+        monthlyCollection: {
+          total: currentMonthAgg[0]?.total || 0,
+          count: currentMonthAgg[0]?.count || 0,
+          monthName: currentMonthName,
+          year: currentCalendarYear,
+          label: currentMonthLabel
+        },
         todayCollection: todayAgg[0]?.total || 0,
         todayCount: todayAgg[0]?.count || 0,
         recentPayments,
-        monthlyCollection,
+        monthlyCollectionLegacy,
+        yearlyInflow,
+        yearlyInflowYear: inflowYear,
+        availableInflowYears,
         courseCollection,
         modeDistribution,
         highPendingStudents: highPending.slice(0, 10),
@@ -439,6 +534,255 @@ exports.getAgingReport = async (req, res) => {
     res.json({ success: true, data: aging });
   } catch (error) {
     console.error('Aging report error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// @desc    Get Yearly Fee Inflow aggregated by month for selected calendar year
+// @route   GET /api/reports/yearly-inflow
+exports.getYearlyInflow = async (req, res) => {
+  try {
+    const currentYear = new Date().getFullYear();
+    const selectedYear = parseInt(req.query.year) || currentYear;
+    const startOfYear = new Date(selectedYear, 0, 1, 0, 0, 0, 0);
+    const startOfNextYear = new Date(selectedYear + 1, 0, 1, 0, 0, 0, 0);
+
+    const [monthlyAgg, distinctYearsAgg] = await Promise.all([
+      Payment.aggregate([
+        {
+          $match: {
+            paymentDate: { $gte: startOfYear, $lt: startOfNextYear },
+            status: 'completed'
+          }
+        },
+        {
+          $group: {
+            _id: { $month: '$paymentDate' },
+            total: { $sum: '$amountPaid' },
+            count: { $sum: 1 }
+          }
+        },
+        { $sort: { '_id': 1 } }
+      ]),
+      Payment.aggregate([
+        { $match: { status: 'completed' } },
+        { $group: { _id: { $year: '$paymentDate' } } },
+        { $sort: { _id: -1 } }
+      ])
+    ]);
+
+    const monthNamesShort = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const monthNamesFull = [
+      'January', 'February', 'March', 'April', 'May', 'June',
+      'July', 'August', 'September', 'October', 'November', 'December'
+    ];
+    const inflowMap = new Map();
+    for (const item of monthlyAgg) {
+      inflowMap.set(item._id, item);
+    }
+
+    const monthlyData = monthNamesShort.map((mName, idx) => {
+      const monthNum = idx + 1;
+      const data = inflowMap.get(monthNum);
+      return {
+        month: mName,
+        monthName: monthNamesFull[idx],
+        fullMonth: `${monthNamesFull[idx]} ${selectedYear}`,
+        monthIndex: monthNum,
+        year: selectedYear,
+        amount: data ? data.total : 0,
+        count: data ? data.count : 0
+      };
+    });
+
+    const paymentYears = distinctYearsAgg.map(p => p._id).filter(Boolean);
+    const availableYears = Array.from(new Set([currentYear, currentYear - 1, currentYear - 2, ...paymentYears])).sort((a, b) => b - a);
+
+    res.json({
+      success: true,
+      data: {
+        year: selectedYear,
+        availableYears,
+        monthlyData,
+        totalCollected: monthlyData.reduce((s, m) => s + m.amount, 0),
+        totalTransactions: monthlyData.reduce((s, m) => s + m.count, 0)
+      }
+    });
+  } catch (error) {
+    console.error('Yearly inflow error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// @desc    Get 3 Side-by-Side Fee Analytics (Fee to Be Collected, Fee Paid, Fee Pending by Category)
+// @route   GET /api/reports/fee-analytics
+exports.getFeeAnalytics = async (req, res) => {
+  try {
+    const { academicYear, calendarYear, course, studyYear, semester } = req.query;
+
+    // 1. Fee to Be Collected (Assessed amounts across categories from active demands)
+    const demandFilter = { status: 'active' };
+    if (academicYear) demandFilter.academicYear = academicYear;
+    if (course) demandFilter.course = new RegExp(`^${escapeRegex(course.trim())}$`, 'i');
+    if (studyYear) demandFilter.year = new RegExp(`^${escapeRegex(studyYear.trim())}$`, 'i');
+    if (calendarYear) {
+      const calYear = parseInt(calendarYear);
+      demandFilter.createdAt = {
+        $gte: new Date(calYear, 0, 1),
+        $lt: new Date(calYear + 1, 0, 1)
+      };
+    }
+
+    const matchedDemands = await FeeDemand.find(demandFilter).lean();
+
+    const assessedByCategory = new Map();
+    let totalAssessedAmount = 0;
+
+    for (const demand of matchedDemands) {
+      for (const cat of demand.categories || []) {
+        if (semester && cat.semester && cat.semester.toLowerCase() !== semester.toLowerCase()) {
+          continue;
+        }
+        const catName = cat.category.trim();
+        const amt = cat.amount || 0;
+        assessedByCategory.set(catName, (assessedByCategory.get(catName) || 0) + amt);
+        totalAssessedAmount += amt;
+      }
+    }
+
+    // 2. Fee Paid (Collected payments across categories based on actual completed allocations)
+    const paymentFilter = { status: 'completed' };
+    if (academicYear) paymentFilter.academicYear = academicYear;
+    if (studyYear) paymentFilter.year = new RegExp(`^${escapeRegex(studyYear.trim())}$`, 'i');
+    if (calendarYear) {
+      const calYear = parseInt(calendarYear);
+      paymentFilter.paymentDate = {
+        $gte: new Date(calYear, 0, 1),
+        $lt: new Date(calYear + 1, 0, 1)
+      };
+    }
+
+    let matchedPayments = await Payment.find(paymentFilter)
+      .populate('student', 'course currentYear status')
+      .lean();
+
+    if (course) {
+      const courseRegex = new RegExp(`^${escapeRegex(course.trim())}$`, 'i');
+      matchedPayments = matchedPayments.filter(p => p.student && courseRegex.test(p.student.course));
+    }
+
+    const paidByCategory = new Map();
+    let totalPaidAmount = 0;
+
+    for (const p of matchedPayments) {
+      if (p.allocations && p.allocations.length > 0) {
+        for (const alloc of p.allocations) {
+          if (semester && alloc.semester && alloc.semester.toLowerCase() !== semester.toLowerCase()) {
+            continue;
+          }
+          const catName = (alloc.category || 'Tuition Fee').trim();
+          const amt = alloc.amount || 0;
+          paidByCategory.set(catName, (paidByCategory.get(catName) || 0) + amt);
+          totalPaidAmount += amt;
+        }
+      } else {
+        // Historical payments without explicit allocation array
+        const catName = (p.feeCategory || 'Tuition Fee').trim();
+        paidByCategory.set(catName, (paidByCategory.get(catName) || 0) + (p.amountPaid || 0));
+        totalPaidAmount += (p.amountPaid || 0);
+      }
+    }
+
+    // 3. Fee Pending (Outstanding balances across categories = max(0, assessed - paid))
+    const allDbCategories = await FeeCategory.find({ status: 'active' }).distinct('name');
+    const allCategoryNames = Array.from(new Set([
+      ...allDbCategories,
+      ...Array.from(assessedByCategory.keys()),
+      ...Array.from(paidByCategory.keys())
+    ])).filter(Boolean);
+
+    const pendingByCategory = new Map();
+    let totalPendingAmount = 0;
+
+    for (const catName of allCategoryNames) {
+      const assessed = assessedByCategory.get(catName) || 0;
+      const paid = paidByCategory.get(catName) || 0;
+      const pending = Math.max(0, assessed - paid);
+      if (pending > 0) {
+        pendingByCategory.set(catName, pending);
+        totalPendingAmount += pending;
+      }
+    }
+
+    // Format Pie 1: Fee to Be Collected
+    const feeToBeCollected = Array.from(assessedByCategory.entries())
+      .filter(([_, amount]) => amount > 0)
+      .map(([category, amount]) => ({
+        name: category,
+        category,
+        amount,
+        percentage: totalAssessedAmount > 0 ? parseFloat(((amount / totalAssessedAmount) * 100).toFixed(1)) : 0
+      }))
+      .sort((a, b) => b.amount - a.amount);
+
+    // Format Pie 2: Fee Paid
+    const feePaid = Array.from(paidByCategory.entries())
+      .filter(([_, amount]) => amount > 0)
+      .map(([category, amount]) => ({
+        name: category,
+        category,
+        amount,
+        percentage: totalPaidAmount > 0 ? parseFloat(((amount / totalPaidAmount) * 100).toFixed(1)) : 0
+      }))
+      .sort((a, b) => b.amount - a.amount);
+
+    // Format Pie 3: Fee Pending
+    const feePending = Array.from(pendingByCategory.entries())
+      .map(([category, amount]) => ({
+        name: category,
+        category,
+        amount,
+        percentage: totalPendingAmount > 0 ? parseFloat(((amount / totalPendingAmount) * 100).toFixed(1)) : 0
+      }))
+      .sort((a, b) => b.amount - a.amount);
+
+    // Filter Options dynamically extracted from MongoDB
+    const [academicYears, courses, distinctPaymentYears] = await Promise.all([
+      FeeDemand.distinct('academicYear'),
+      Course.find({ status: 'active' }).distinct('courseName'),
+      Payment.aggregate([
+        { $match: { status: 'completed' } },
+        { $group: { _id: { $year: '$paymentDate' } } },
+        { $sort: { _id: -1 } }
+      ])
+    ]);
+
+    const calYears = distinctPaymentYears.map(p => p._id).filter(Boolean);
+    const thisYear = new Date().getFullYear();
+    const availableCalendarYears = Array.from(new Set([thisYear, thisYear - 1, ...calYears])).sort((a, b) => b - a);
+
+    res.json({
+      success: true,
+      data: {
+        feeToBeCollected,
+        feePaid,
+        feePending,
+        totals: {
+          totalDemand: totalAssessedAmount,
+          totalPaid: totalPaidAmount,
+          totalPending: totalPendingAmount
+        },
+        filterOptions: {
+          academicYears: academicYears.filter(Boolean).sort().reverse(),
+          calendarYears: availableCalendarYears,
+          courses: courses.filter(Boolean).sort(),
+          studyYears: ['1st Year', '2nd Year', '3rd Year'],
+          semesters: ['Semester 1', 'Semester 2', 'Semester 3', 'Semester 4', 'Semester 5', 'Semester 6']
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Fee analytics error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 };

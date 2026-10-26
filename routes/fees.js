@@ -9,15 +9,15 @@ const {
 
 // Categories
 router.get('/categories', protect, getCategories);
-router.post('/categories', protect, authorize('admin', 'accountant'), createCategory);
-router.put('/categories/:id', protect, authorize('admin', 'accountant'), updateCategory);
+router.post('/categories', protect, authorize('admin'), createCategory);
+router.put('/categories/:id', protect, authorize('admin'), updateCategory);
 
-// Structures
+// Structures (Strictly Admin only for all mutations)
 router.get('/structures', protect, getStructures);
-router.post('/structures', protect, authorize('admin', 'accountant'), createStructure);
+router.post('/structures', protect, authorize('admin'), createStructure);
 router.post('/demo-structures', protect, authorize('admin'), generateDemoFeeStructures);
-router.put('/structures/:id', protect, authorize('admin', 'accountant'), updateStructure);
-router.delete('/structures/:id', protect, authorize('admin', 'accountant'), deleteStructure);
+router.put('/structures/:id', protect, authorize('admin'), updateStructure);
+router.delete('/structures/:id', protect, authorize('admin'), deleteStructure);
 
 // Demands
 router.get('/demands', protect, getDemands);

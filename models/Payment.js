@@ -23,12 +23,22 @@ const paymentSchema = new mongoose.Schema({
     type: String,
     required: true
   },
+  // Primary fee category or summary label
+  feeCategory: {
+    type: String,
+    trim: true
+  },
+  semester: {
+    type: String,
+    default: null
+  },
   // Payment allocation: how this payment is distributed
   allocations: [{
     academicYear: { type: String, required: true },
     year: { type: String, required: true },
     category: { type: String, required: true },
-    amount: { type: Number, required: true, min: 0 }
+    amount: { type: Number, required: true, min: 0 },
+    semester: { type: String, default: null }
   }],
   // Total amount paid in this transaction
   amountPaid: {

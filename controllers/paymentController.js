@@ -17,6 +17,8 @@ exports.recordPayment = async (req, res) => {
       paymentMode,
       transactionId,
       remarks,
+      feeCategory,
+      semester,
       allocations
     } = req.body;
 
@@ -26,12 +28,17 @@ exports.recordPayment = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Student not found' });
     }
 
+    const parsedAmountPaid = parseFloat(amountPaid);
+    if (isNaN(parsedAmountPaid) || parsedAmountPaid <= 0) {
+      return res.status(400).json({ success: false, message: 'Payment amount must be greater than zero' });
+    }
+
     // Check for advance payment setting
     const advanceSetting = await Setting.findOne({ key: 'allowAdvancePayment' });
     const allowAdvance = advanceSetting ? advanceSetting.value === true : false;
 
     // Validate payment amount on backend
-    const validation = await validatePaymentAmount(studentId, academicYear, amountPaid, allowAdvance);
+    const validation = await validatePaymentAmount(studentId, academicYear, parsedAmountPaid, allowAdvance);
     if (!validation.valid) {
       return res.status(400).json({
         success: false,
@@ -39,6 +46,51 @@ exports.recordPayment = async (req, res) => {
         data: { maxAllowed: validation.maxAllowed, remaining: validation.remaining }
       });
     }
+
+    // Determine the student's year for this academic year
+    const enrollment = student.enrollmentHistory.find(e => e.academicYear === academicYear);
+    const year = enrollment ? enrollment.year : student.currentYear;
+
+    // Validate category allocations
+    let finalAllocations = [];
+    if (Array.isArray(allocations) && allocations.length > 0) {
+      const totalAllocated = allocations.reduce((sum, a) => sum + (parseFloat(a.amount) || 0), 0);
+      if (Math.abs(totalAllocated - parsedAmountPaid) > 0.01) {
+        return res.status(400).json({
+          success: false,
+          message: `The amount allocated across categories (₹${totalAllocated}) must equal the payment amount (₹${parsedAmountPaid}).`
+        });
+      }
+      finalAllocations = allocations.map(a => ({
+        academicYear: a.academicYear || academicYear,
+        year: a.year || year,
+        category: a.category ? a.category.trim() : 'Tuition Fee',
+        amount: parseFloat(a.amount),
+        semester: a.semester || null
+      }));
+    } else if (feeCategory && feeCategory.trim()) {
+      finalAllocations = [{
+        academicYear,
+        year,
+        category: feeCategory.trim(),
+        amount: parsedAmountPaid,
+        semester: semester || null
+      }];
+    } else {
+      finalAllocations = [{
+        academicYear,
+        year,
+        category: 'Tuition Fee',
+        amount: parsedAmountPaid,
+        semester: semester || null
+      }];
+    }
+
+    // Primary fee category and semester
+    const primaryCategory = feeCategory && feeCategory.trim()
+      ? feeCategory.trim()
+      : (finalAllocations.length === 1 ? finalAllocations[0].category : finalAllocations.map(a => a.category).join(', '));
+    const primarySemester = semester || (finalAllocations.length === 1 ? finalAllocations[0].semester : null);
 
     // Generate unique receipt number
     const receiptNo = await generateReceiptNo();
@@ -52,18 +104,16 @@ exports.recordPayment = async (req, res) => {
       });
     }
 
-    // Determine the student's year for this academic year
-    const enrollment = student.enrollmentHistory.find(e => e.academicYear === academicYear);
-    const year = enrollment ? enrollment.year : student.currentYear;
-
     const payment = await Payment.create({
       receiptNo,
       student: student._id,
       studentId: student.studentId,
       academicYear,
       year,
-      allocations: allocations || [],
-      amountPaid: parseFloat(amountPaid),
+      feeCategory: primaryCategory,
+      semester: primarySemester,
+      allocations: finalAllocations,
+      amountPaid: parsedAmountPaid,
       paymentDate: paymentDate || new Date(),
       paymentMode,
       transactionId,
@@ -93,7 +143,9 @@ exports.recordPayment = async (req, res) => {
       description: `Recorded payment of ₹${amountPaid} for ${student.name} (${studentId})`,
       newValue: {
         receiptNo,
-        amountPaid,
+        amountPaid: parsedAmountPaid,
+        feeCategory: primaryCategory,
+        allocations: finalAllocations,
         paymentMode,
         academicYear,
         transactionId
@@ -344,6 +396,58 @@ exports.getTodayCollection = async (req, res) => {
       data: {
         total: result[0]?.total || 0,
         count: result[0]?.count || 0
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// @desc    Get monthly collection for current or specified month/year
+// @route   GET /api/payments/monthly
+exports.getMonthlyCollection = async (req, res) => {
+  try {
+    const today = new Date();
+    const monthNamesFull = [
+      'January', 'February', 'March', 'April', 'May', 'June',
+      'July', 'August', 'September', 'October', 'November', 'December'
+    ];
+    const year = parseInt(req.query.year) || today.getFullYear();
+    const month = req.query.month !== undefined ? parseInt(req.query.month) : today.getMonth();
+
+    const startOfMonth = new Date(year, month, 1, 0, 0, 0, 0);
+    const startOfNextMonth = new Date(year, month + 1, 1, 0, 0, 0, 0);
+
+    const result = await Payment.aggregate([
+      {
+        $match: {
+          paymentDate: { $gte: startOfMonth, $lt: startOfNextMonth },
+          status: 'completed'
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          total: { $sum: '$amountPaid' },
+          count: { $sum: 1 }
+        }
+      }
+    ]);
+
+    const total = result[0]?.total || 0;
+    const count = result[0]?.count || 0;
+    const monthName = monthNamesFull[month];
+    const label = `${monthName} ${year}`;
+
+    res.json({
+      success: true,
+      data: {
+        total,
+        count,
+        year,
+        month,
+        monthName,
+        label
       }
     });
   } catch (error) {

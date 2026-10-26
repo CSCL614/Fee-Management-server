@@ -17,11 +17,11 @@ function computeStudentSummary(student, demands = [], payments = [], targetAcade
     const yearPayments = sortedPayments.filter(p => p.academicYear === demand.academicYear);
     const totalPaidForYear = yearPayments.reduce((sum, p) => sum + (p.amountPaid || 0), 0);
 
-    const activeCategories = (demand.categories || []).filter(c => !c.activationDate || new Date(c.activationDate) <= now);
-    const upcomingCategories = (demand.categories || []).filter(c => c.activationDate && new Date(c.activationDate) > now);
+    const activeCategoriesRaw = (demand.categories || []).filter(c => !c.activationDate || new Date(c.activationDate) <= now);
+    const upcomingCategoriesRaw = (demand.categories || []).filter(c => c.activationDate && new Date(c.activationDate) > now);
 
-    const activeDemandTotal = activeCategories.reduce((sum, c) => sum + (c.amount || 0), 0);
-    const upcomingDemandTotal = upcomingCategories.reduce((sum, c) => sum + (c.amount || 0), 0);
+    const activeDemandTotal = activeCategoriesRaw.reduce((sum, c) => sum + (c.amount || 0), 0);
+    const upcomingDemandTotal = upcomingCategoriesRaw.reduce((sum, c) => sum + (c.amount || 0), 0);
 
     const currentYearFee = activeDemandTotal;
     const previousYearDue = cumulativeCarryForward;
@@ -33,6 +33,60 @@ function computeStudentSummary(student, demands = [], payments = [], targetAcade
     let status = 'Due';
     if (pending === 0) status = 'Paid';
     else if (totalPaid > 0) status = 'Partial';
+
+    // Compute category-wise payment breakdown
+    const categoryPaidMap = new Map();
+    let unallocatedPaymentTotal = 0;
+
+    for (const payment of yearPayments) {
+      if (payment.allocations && payment.allocations.length > 0) {
+        for (const alloc of payment.allocations) {
+          const key = `${(alloc.category || '').toLowerCase()}|${alloc.semester || ''}`;
+          categoryPaidMap.set(key, (categoryPaidMap.get(key) || 0) + (alloc.amount || 0));
+        }
+      } else {
+        // If historical payment without allocation array, track unallocated
+        unallocatedPaymentTotal += (payment.amountPaid || 0);
+      }
+    }
+
+    // Process categories with paid & remaining
+    const categoryBalances = (demand.categories || []).map(c => {
+      const isUpcoming = Boolean(c.activationDate && new Date(c.activationDate) > now);
+      const key = `${(c.category || '').toLowerCase()}|${c.semester || ''}`;
+      let paid = categoryPaidMap.get(key) || 0;
+
+      // If there are unallocated historical payments, attribute to Tuition Fee
+      if (unallocatedPaymentTotal > 0 && c.category.toLowerCase().includes('tuition')) {
+        const needed = Math.max(0, c.amount - paid);
+        const applyAmt = Math.min(needed, unallocatedPaymentTotal);
+        paid += applyAmt;
+        unallocatedPaymentTotal -= applyAmt;
+      }
+
+      const catPending = Math.max(0, (c.amount || 0) - paid);
+      let catStatus = 'Due';
+      if (catPending === 0) catStatus = 'Paid';
+      else if (paid > 0) catStatus = 'Partial';
+      if (isUpcoming && paid === 0) catStatus = 'upcoming';
+
+      return {
+        _id: c._id,
+        category: c.category,
+        amount: c.amount,
+        frequency: c.frequency || 'ANNUAL',
+        semester: c.semester || null,
+        activationDate: c.activationDate || null,
+        dueDate: c.dueDate || null,
+        paidAmount: paid,
+        remainingAmount: catPending,
+        status: catStatus,
+        isUpcoming
+      };
+    });
+
+    const activeCategories = categoryBalances.filter(c => !c.isUpcoming);
+    const upcomingCategories = categoryBalances.filter(c => c.isUpcoming);
 
     const summary = {
       academicYear: demand.academicYear,
@@ -47,7 +101,7 @@ function computeStudentSummary(student, demands = [], payments = [], targetAcade
       pending,
       advanceCredit,
       status,
-      categories: demand.categories,
+      categories: categoryBalances,
       activeCategories,
       upcomingCategories,
       payments: yearPayments.map(p => ({
@@ -56,6 +110,9 @@ function computeStudentSummary(student, demands = [], payments = [], targetAcade
         paymentDate: p.paymentDate,
         paymentMode: p.paymentMode,
         transactionId: p.transactionId,
+        feeCategory: p.feeCategory,
+        semester: p.semester,
+        allocations: p.allocations || [],
         status: p.status
       }))
     };
@@ -224,55 +281,104 @@ async function generateFeeLedger(studentId) {
   // Merge into a single chronological ledger
   const entries = [];
 
-  // Add demand entries (debits)
+  // Add demand entries (debits by category)
   for (const demand of demands) {
-    entries.push({
-      date: demand.createdAt,
-      type: 'demand',
-      description: `Fee Demand - ${demand.year} (${demand.academicYear})`,
-      debit: demand.totalDemand,
-      credit: 0,
-      academicYear: demand.academicYear,
-      year: demand.year,
-      referenceId: demand._id
-    });
+    if (demand.categories && demand.categories.length > 0) {
+      for (const cat of demand.categories) {
+        entries.push({
+          date: cat.activationDate || demand.createdAt,
+          type: 'demand',
+          category: cat.category,
+          semester: cat.semester || null,
+          description: `${cat.category}${cat.semester ? ` (${cat.semester})` : ''} assessed`,
+          debit: cat.amount,
+          credit: 0,
+          academicYear: demand.academicYear,
+          year: demand.year,
+          referenceId: demand._id
+        });
+      }
+    } else {
+      entries.push({
+        date: demand.createdAt,
+        type: 'demand',
+        category: 'Fee Assessment',
+        semester: null,
+        description: `Fee Demand assessed - ${demand.year} (${demand.academicYear})`,
+        debit: demand.totalDemand,
+        credit: 0,
+        academicYear: demand.academicYear,
+        year: demand.year,
+        referenceId: demand._id
+      });
+    }
   }
 
-  // Add payment entries (credits)
+  // Add payment entries (credits by allocation category)
   for (const payment of payments) {
-    entries.push({
-      date: payment.paymentDate,
-      type: 'payment',
-      description: `Payment - ${payment.paymentMode} (${payment.receiptNo})`,
-      debit: 0,
-      credit: payment.amountPaid,
-      academicYear: payment.academicYear,
-      year: payment.year,
-      referenceId: payment.receiptNo
-    });
+    if (payment.allocations && payment.allocations.length > 0) {
+      for (const alloc of payment.allocations) {
+        entries.push({
+          date: payment.paymentDate,
+          type: 'payment',
+          category: alloc.category,
+          semester: alloc.semester || payment.semester || null,
+          description: `${alloc.category}${alloc.semester ? ` (${alloc.semester})` : ''} payment - ${payment.paymentMode} (${payment.receiptNo})`,
+          debit: 0,
+          credit: alloc.amount,
+          academicYear: alloc.academicYear || payment.academicYear,
+          year: alloc.year || payment.year,
+          referenceId: payment.receiptNo,
+          receiptNo: payment.receiptNo,
+          allocations: payment.allocations
+        });
+      }
+    } else {
+      entries.push({
+        date: payment.paymentDate,
+        type: 'payment',
+        category: payment.feeCategory || 'Tuition Fee',
+        semester: payment.semester || null,
+        description: `${payment.feeCategory ? `${payment.feeCategory} payment` : 'Payment'} - ${payment.paymentMode} (${payment.receiptNo})`,
+        debit: 0,
+        credit: payment.amountPaid,
+        academicYear: payment.academicYear,
+        year: payment.year,
+        referenceId: payment.receiptNo,
+        receiptNo: payment.receiptNo,
+        allocations: []
+      });
+    }
   }
 
   // Add cancelled payment entries for transparency
   for (const payment of cancelledPayments) {
+    const catName = payment.feeCategory || (payment.allocations?.[0]?.category) || 'Tuition Fee';
     entries.push({
       date: payment.paymentDate,
       type: 'payment',
-      description: `Payment - ${payment.paymentMode} (${payment.receiptNo})`,
+      category: catName,
+      semester: payment.semester || null,
+      description: `${catName} payment - ${payment.paymentMode} (${payment.receiptNo})`,
       debit: 0,
       credit: payment.amountPaid,
       academicYear: payment.academicYear,
       year: payment.year,
-      referenceId: payment.receiptNo
+      referenceId: payment.receiptNo,
+      receiptNo: payment.receiptNo
     });
     entries.push({
       date: payment.cancelledAt || payment.updatedAt,
       type: 'cancellation',
-      description: `Payment Cancelled (${payment.receiptNo}) - ${payment.cancelReason || 'No reason'}`,
+      category: catName,
+      semester: payment.semester || null,
+      description: `Payment Cancelled (${payment.receiptNo}) - ${payment.cancelReason || 'Reversal'}`,
       debit: payment.amountPaid,
       credit: 0,
       academicYear: payment.academicYear,
       year: payment.year,
-      referenceId: payment.receiptNo
+      referenceId: payment.receiptNo,
+      receiptNo: payment.receiptNo
     });
   }
 
