@@ -1738,6 +1738,8 @@ exports.bulkGraduateStudents = async (req, res) => {
   try {
     const {
       studentIds,
+      batch,
+      course,
       passingYear,
       passingAcademicYear,
       completionDate,
@@ -1745,22 +1747,26 @@ exports.bulkGraduateStudents = async (req, res) => {
       defaultResultStatus = 'Passed'
     } = req.body;
 
-    if (!Array.isArray(studentIds) || studentIds.length === 0) {
-      return res.status(400).json({ success: false, message: 'Please provide at least one student ID to graduate' });
+    let query = { status: { $ne: 'Graduated' } };
+
+    if (Array.isArray(studentIds) && studentIds.length > 0) {
+      query._id = { $in: studentIds };
+    } else if (batch) {
+      query.batch = batch;
+      if (course && course !== 'All') query.course = course;
+    } else {
+      return res.status(400).json({ success: false, message: 'Please provide at least one student ID or a batch to graduate' });
     }
 
-    const resolvedPassingYear = parseInt(passingYear, 10) || new Date().getFullYear();
+    const resolvedPassingYear = parseInt(passingYear, 10) || (batch ? parseInt(batch.split('-')[1], 10) : new Date().getFullYear()) || new Date().getFullYear();
     const resolvedCompletionDate = completionDate ? new Date(completionDate) : new Date();
 
-    const students = await Student.find({
-      _id: { $in: studentIds },
-      status: { $ne: 'Graduated' }
-    });
+    const students = await Student.find(query);
 
     if (students.length === 0) {
       return res.status(400).json({
         success: false,
-        message: 'No eligible active students found for graduation from the selected list'
+        message: 'No eligible active students found for graduation matching the criteria'
       });
     }
 
