@@ -1,12 +1,15 @@
 const XLSX = require('xlsx');
 const multer = require('multer');
+const mongoose = require('mongoose');
 const Student = require('../models/Student');
 const Course = require('../models/Course');
 const FeeStructure = require('../models/FeeStructure');
 const FeeDemand = require('../models/FeeDemand');
 const Payment = require('../models/Payment');
+const ImportComment = require('../models/ImportComment');
 const { createAuditLog, generateId, generateReceiptNo } = require('../utils/helpers');
 const { calculateFeeSummary } = require('../utils/feeCalculator');
+const { extractAllCommentsFromWorkbook, parseCellAddress } = require('../utils/excelCommentExtractor');
 
 // Configure Multer for Excel file upload (in-memory buffer, max 10MB)
 const storage = multer.memoryStorage();
@@ -596,6 +599,14 @@ exports.previewImport = [
       let invalidCount = 0;
       let discrepancyCount = 0;
 
+      // Extract cell comments & notes from workbook
+      let commentsResult = { comments: [], summary: { totalCommentsExtracted: 0, totalReferencesIdentified: 0, unverifiedReferences: 0, unmappedComments: 0 } };
+      try {
+        commentsResult = await extractAllCommentsFromWorkbook(req.file.buffer);
+      } catch (cErr) {
+        console.warn('Comment extraction warning:', cErr.message);
+      }
+
       for (let i = 0; i < rawRows.length; i++) {
         const rawRow = rawRows[i];
         const rowIndex = i + 2; // 1-indexed, header is row 1
@@ -611,6 +622,21 @@ exports.previewImport = [
         records.push(validated);
       }
 
+      // Link extracted comments to student records by row number where possible
+      const enrichedComments = commentsResult.comments.map(c => {
+        if (c.rowNumber && c.rowNumber >= 2 && c.rowNumber - 2 < records.length) {
+          const matchedRecord = records[c.rowNumber - 2];
+          if (matchedRecord && matchedRecord.data) {
+            return {
+              ...c,
+              admissionNo: c.admissionNo || matchedRecord.data.admissionNo || null,
+              studentName: c.studentName || matchedRecord.data.name || null
+            };
+          }
+        }
+        return c;
+      });
+
       res.json({
         success: true,
         data: {
@@ -622,7 +648,9 @@ exports.previewImport = [
           duplicateCount,
           invalidCount,
           discrepancyCount,
-          records
+          records,
+          commentsSummary: commentsResult.summary,
+          extractedComments: enrichedComments
         }
       });
     } catch (error) {
@@ -880,6 +908,72 @@ exports.confirmImport = [
         }
       }
 
+      // ==================== EXTRACT & PERSIST WORKBOOK COMMENTS ====================
+      let commentsResult = { comments: [] };
+      try {
+        commentsResult = await extractAllCommentsFromWorkbook(req.file.buffer);
+      } catch (cErr) {
+        console.warn('Comment extraction warning in confirm:', cErr.message);
+      }
+
+      const importBatchId = `BATCH-${Date.now()}`;
+      const insertedMap = new Map();
+      insertedStudents.forEach(s => {
+        if (s.admissionNo) insertedMap.set(s.admissionNo.toLowerCase(), s);
+      });
+
+      const commentsToSave = commentsResult.comments.map(c => {
+        let studentId = c.studentId || null;
+        let admissionNo = c.admissionNo || null;
+        let studentName = c.studentName || null;
+        let studentRef = null;
+
+        if (c.rowNumber && c.rowNumber >= 2 && c.rowNumber - 2 < rawRows.length) {
+          const rawRow = rawRows[c.rowNumber - 2];
+          const mapped = mapRowData(rawRow);
+          if (mapped.admissionNo) {
+            admissionNo = mapped.admissionNo;
+            studentName = mapped.name;
+            const inserted = insertedMap.get(mapped.admissionNo.toLowerCase());
+            const existing = existingStudentsMap.get(mapped.admissionNo.toLowerCase());
+            const sMatch = inserted || existing;
+            if (sMatch) {
+              studentId = sMatch.studentId;
+              studentRef = sMatch._id;
+            }
+          }
+        }
+
+        return {
+          importBatchId,
+          fileName: req.file.originalname,
+          worksheetName: c.worksheetName,
+          cellAddress: c.cellAddress,
+          rowNumber: c.rowNumber,
+          colLetter: c.colLetter,
+          relatedField: c.relatedField || '',
+          originalCellValue: c.originalCellValue != null ? c.originalCellValue : '',
+          originalCommentText: c.originalCommentText,
+          commentAuthor: c.commentAuthor || 'Unknown Author',
+          commentTimestamp: c.commentTimestamp || null,
+          isThreaded: Boolean(c.isThreaded),
+          isReply: Boolean(c.isReply),
+          parentCommentId: c.parentCommentId || null,
+          studentId,
+          admissionNo,
+          studentName,
+          student: studentRef,
+          suggestedFieldMapping: c.suggestedFieldMapping || {},
+          verificationStatus: 'unverified',
+          createdBy: req.user._id
+        };
+      });
+
+      let savedComments = [];
+      if (commentsToSave.length > 0) {
+        savedComments = await ImportComment.insertMany(commentsToSave);
+      }
+
       // ==================== AUDIT LOGGING (Section 7) ====================
       await createAuditLog({
         user: req.user._id,
@@ -887,13 +981,15 @@ exports.confirmImport = [
         userRole: req.user.role,
         action: 'Excel Student Import',
         entity: 'Student',
-        entityId: `IMPORT-${Date.now()}`,
-        description: `Imported ${insertedStudents.length} student(s) from "${req.file.originalname}". Skipped: ${skippedDuplicates.length} duplicate(s), ${skippedInvalids.length} invalid. Mode: ${mode}. Fee Demands: ${createdDemands.length}. Historical Payments: ${createdPayments.length}.`,
+        entityId: importBatchId,
+        description: `Imported ${insertedStudents.length} student(s) and ${savedComments.length} cell comments from "${req.file.originalname}". Skipped: ${skippedDuplicates.length} duplicate(s), ${skippedInvalids.length} invalid. Mode: ${mode}. Fee Demands: ${createdDemands.length}. Historical Payments: ${createdPayments.length}.`,
         newValue: {
+          importBatchId,
           originalFilename: req.file.originalname,
           mode,
           totalRows: rawRows.length,
           insertedCount: insertedStudents.length,
+          commentsImportedCount: savedComments.length,
           duplicateCount: skippedDuplicates.length,
           invalidCount: skippedInvalids.length,
           feeDemandsCreated: createdDemands.length,
@@ -904,12 +1000,14 @@ exports.confirmImport = [
 
       res.status(201).json({
         success: true,
-        message: `Successfully imported ${insertedStudents.length} student records from ${req.file.originalname}`,
+        message: `Successfully imported ${insertedStudents.length} student records and preserved ${savedComments.length} cell comments from ${req.file.originalname}`,
         data: {
+          importBatchId,
           filename: req.file.originalname,
           mode,
           totalRows: rawRows.length,
           insertedCount: insertedStudents.length,
+          commentsImportedCount: savedComments.length,
           duplicateCount: skippedDuplicates.length,
           invalidCount: skippedInvalids.length,
           feeDemandsCreated: createdDemands.length,
@@ -947,3 +1045,329 @@ exports.confirmImport = [
     }
   }
 ];
+
+/**
+ * @desc    Get extracted Excel comments from database with filters & pagination
+ * @route   GET /api/imports/comments
+ * @access  Admin Only
+ */
+exports.getImportComments = async (req, res) => {
+  try {
+    const { batchId, worksheetName, verificationStatus, search, page = 1, limit = 50 } = req.query;
+    const filter = {};
+
+    if (batchId) filter.importBatchId = batchId;
+    if (worksheetName && worksheetName !== 'All') filter.worksheetName = worksheetName;
+    if (verificationStatus && verificationStatus !== 'All') filter.verificationStatus = verificationStatus;
+
+    if (search && search.trim()) {
+      const regex = new RegExp(escapeRegex(search.trim()), 'i');
+      filter.$or = [
+        { originalCommentText: regex },
+        { cellAddress: regex },
+        { admissionNo: regex },
+        { studentName: regex },
+        { commentAuthor: regex },
+        { 'suggestedFieldMapping.detectedReceiptNo': regex },
+        { 'suggestedFieldMapping.detectedTxnId': regex }
+      ];
+    }
+
+    const pageNum = parseInt(page, 10) || 1;
+    const limitNum = parseInt(limit, 10) || 50;
+
+    const [total, comments, summaryStats] = await Promise.all([
+      ImportComment.countDocuments(filter),
+      ImportComment.find(filter)
+        .sort({ createdAt: -1, rowNumber: 1 })
+        .skip((pageNum - 1) * limitNum)
+        .limit(limitNum)
+        .lean(),
+      ImportComment.aggregate([
+        ...(batchId ? [{ $match: { importBatchId: batchId } }] : []),
+        {
+          $group: {
+            _id: null,
+            total: { $sum: 1 },
+            unverified: { $sum: { $cond: [{ $eq: ['$verificationStatus', 'unverified'] }, 1, 0] } },
+            verified: { $sum: { $cond: [{ $eq: ['$verificationStatus', 'verified'] }, 1, 0] } },
+            mapped: { $sum: { $cond: [{ $eq: ['$verificationStatus', 'mapped'] }, 1, 0] } },
+            ignored: { $sum: { $cond: [{ $eq: ['$verificationStatus', 'ignored'] }, 1, 0] } }
+          }
+        }
+      ])
+    ]);
+
+    const summary = summaryStats[0] || { total: 0, unverified: 0, verified: 0, mapped: 0, ignored: 0 };
+
+    res.json({
+      success: true,
+      data: comments,
+      summary: {
+        totalComments: summary.total || total,
+        unverified: summary.unverified,
+        verified: summary.verified,
+        mapped: summary.mapped,
+        ignored: summary.ignored
+      },
+      pagination: {
+        total,
+        page: pageNum,
+        pages: Math.ceil(total / limitNum),
+        limit: limitNum
+      }
+    });
+  } catch (error) {
+    console.error('Get import comments error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Server error' });
+  }
+};
+
+/**
+ * @desc    Export extracted Excel comments into an Excel (.xlsx) workbook
+ * @route   GET /api/imports/comments/export
+ * @access  Admin Only
+ */
+exports.exportImportComments = async (req, res) => {
+  try {
+    const { batchId, worksheetName, verificationStatus, search } = req.query;
+    const filter = {};
+
+    if (batchId) filter.importBatchId = batchId;
+    if (worksheetName && worksheetName !== 'All') filter.worksheetName = worksheetName;
+    if (verificationStatus && verificationStatus !== 'All') filter.verificationStatus = verificationStatus;
+
+    if (search && search.trim()) {
+      const regex = new RegExp(escapeRegex(search.trim()), 'i');
+      filter.$or = [
+        { originalCommentText: regex },
+        { cellAddress: regex },
+        { admissionNo: regex },
+        { studentName: regex },
+        { commentAuthor: regex },
+        { 'suggestedFieldMapping.detectedReceiptNo': regex },
+        { 'suggestedFieldMapping.detectedTxnId': regex }
+      ];
+    }
+
+    const comments = await ImportComment.find(filter).sort({ createdAt: -1, rowNumber: 1 }).lean();
+
+    const exportRows = comments.map(c => ({
+      'Batch ID': c.importBatchId,
+      'Worksheet': c.worksheetName,
+      'Cell Address': c.cellAddress,
+      'Row': c.rowNumber || '',
+      'Column': c.colLetter || '',
+      'Related Field': c.relatedField || '',
+      'Original Cell Value': c.originalCellValue != null ? String(c.originalCellValue) : '',
+      'Comment Text': c.originalCommentText,
+      'Author': c.commentAuthor || 'Unknown',
+      'Timestamp': c.commentTimestamp ? new Date(c.commentTimestamp).toLocaleString('en-IN') : '',
+      'Admission No': c.admissionNo || '',
+      'Student Name': c.studentName || '',
+      'Detected Receipt No': c.suggestedFieldMapping?.detectedReceiptNo || '',
+      'Detected Txn ID': c.suggestedFieldMapping?.detectedTxnId || '',
+      'Detected Amount': c.suggestedFieldMapping?.detectedAmount != null ? c.suggestedFieldMapping.detectedAmount : '',
+      'Detected Mode': c.suggestedFieldMapping?.detectedPaymentMode || '',
+      'Verification Status': c.verificationStatus,
+      'Verified By': c.verifiedByName || '',
+      'Verified At': c.verifiedAt ? new Date(c.verifiedAt).toLocaleString('en-IN') : '',
+      'Remarks': c.remarks || ''
+    }));
+
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.json_to_sheet(exportRows);
+    XLSX.utils.book_append_sheet(wb, ws, 'Extracted Comments');
+
+    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+
+    res.setHeader('Content-Disposition', `attachment; filename="excel_import_comments_${Date.now()}.xlsx"`);
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.send(buffer);
+  } catch (error) {
+    console.error('Export import comments error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Failed to export comments' });
+  }
+};
+
+/**
+ * @desc    Verify or dismiss an extracted Excel comment
+ * @route   PATCH /api/imports/comments/:id/verify
+ * @access  Admin Only
+ */
+exports.verifyImportComment = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status, remarks } = req.body; // status: 'verified' | 'ignored' | 'unverified'
+
+    const comment = await ImportComment.findById(id);
+    if (!comment) {
+      return res.status(404).json({ success: false, message: 'Extracted comment record not found' });
+    }
+
+    if (status) comment.verificationStatus = status;
+    if (remarks !== undefined) comment.remarks = remarks;
+    comment.verifiedBy = req.user._id;
+    comment.verifiedByName = req.user.name;
+    comment.verifiedAt = new Date();
+
+    await comment.save();
+
+    await createAuditLog({
+      user: req.user._id,
+      userName: req.user.name,
+      userRole: req.user.role,
+      action: 'Import Comment Verification',
+      entity: 'ImportComment',
+      entityId: comment._id.toString(),
+      description: `Updated comment ${comment.cellAddress} status to ${comment.verificationStatus}. Remarks: ${comment.remarks || 'None'}`,
+      ipAddress: req.ip
+    });
+
+    res.json({
+      success: true,
+      message: `Comment verification status updated to "${comment.verificationStatus}"`,
+      data: comment
+    });
+  } catch (error) {
+    console.error('Verify comment error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Server error' });
+  }
+};
+
+/**
+ * @desc    Record a verified payment transaction from an extracted comment
+ * @route   POST /api/imports/comments/:id/create-payment
+ * @access  Admin Only
+ */
+exports.createPaymentFromComment = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const {
+      studentId,
+      academicYear,
+      year,
+      category = 'Tuition Fee',
+      amount,
+      paymentMode,
+      paymentDate,
+      receiptNo: customReceiptNo,
+      transactionId,
+      remarks
+    } = req.body;
+
+    const comment = await ImportComment.findById(id);
+    if (!comment) {
+      return res.status(404).json({ success: false, message: 'Comment record not found' });
+    }
+
+    if (comment.verificationStatus === 'mapped') {
+      return res.status(400).json({
+        success: false,
+        message: 'A payment transaction has already been recorded from this comment to prevent duplicates.'
+      });
+    }
+
+    const resolvedStudentId = studentId || comment.studentId;
+    if (!resolvedStudentId) {
+      return res.status(400).json({ success: false, message: 'Student ID or Admission No is required to record payment' });
+    }
+
+    const student = await Student.findOne({
+      $or: [{ studentId: resolvedStudentId }, { admissionNo: resolvedStudentId }, { _id: mongoose.isValidObjectId(resolvedStudentId) ? resolvedStudentId : null }]
+    });
+
+    if (!student) {
+      return res.status(404).json({ success: false, message: `Student "${resolvedStudentId}" not found in database` });
+    }
+
+    const paymentAmount = parseNumber(amount || comment.suggestedFieldMapping?.detectedAmount);
+    if (paymentAmount <= 0) {
+      return res.status(400).json({ success: false, message: 'A positive payment amount is required' });
+    }
+
+    const receiptNo = customReceiptNo || comment.suggestedFieldMapping?.detectedReceiptNo || await generateReceiptNo();
+    const finalTxnId = transactionId || comment.suggestedFieldMapping?.detectedTxnId || null;
+    const finalMode = normalizePaymentMode(paymentMode || comment.suggestedFieldMapping?.detectedPaymentMode || 'Bank Transfer');
+    const finalDate = paymentDate ? new Date(paymentDate) : (comment.suggestedFieldMapping?.detectedDate || new Date());
+    const finalAcademicYear = academicYear || student.currentAcademicYear || '2026-27';
+    const finalYear = year || student.currentYear || '1st Year';
+
+    // Duplicate transaction check
+    const existingPayment = await Payment.findOne({
+      $or: [
+        { receiptNo },
+        ...(finalTxnId ? [{ transactionId: finalTxnId }] : [])
+      ],
+      status: 'completed'
+    });
+
+    if (existingPayment) {
+      return res.status(400).json({
+        success: false,
+        message: `Duplicate payment detected: Receipt/Transaction "${existingPayment.receiptNo || finalTxnId}" already exists in the system.`
+      });
+    }
+
+    const payment = await Payment.create({
+      receiptNo,
+      transactionId: finalTxnId,
+      student: student._id,
+      studentId: student.studentId,
+      academicYear: finalAcademicYear,
+      year: finalYear,
+      allocations: [{
+        academicYear: finalAcademicYear,
+        year: finalYear,
+        category,
+        amount: paymentAmount
+      }],
+      amountPaid: paymentAmount,
+      paymentDate: isNaN(finalDate.getTime()) ? new Date() : finalDate,
+      paymentMode: finalMode,
+      remarks: remarks || `Payment verified from Excel comment at cell ${comment.cellAddress} (${comment.originalCommentText})`,
+      enteredBy: req.user._id,
+      enteredByName: req.user.name,
+      status: 'completed',
+      locked: true,
+      lockedAt: new Date()
+    });
+
+    // Mark comment as mapped
+    comment.verificationStatus = 'mapped';
+    comment.mappedPayment = payment._id;
+    comment.verifiedBy = req.user._id;
+    comment.verifiedByName = req.user.name;
+    comment.verifiedAt = new Date();
+    await comment.save();
+
+    await createAuditLog({
+      user: req.user._id,
+      userName: req.user.name,
+      userRole: req.user.role,
+      action: 'Payment Created From Comment',
+      entity: 'Payment',
+      entityId: payment._id.toString(),
+      description: `Created payment of ₹${paymentAmount.toLocaleString('en-IN')} (Receipt: ${receiptNo}) from Excel comment at cell ${comment.cellAddress} for student ${student.name} (${student.studentId})`,
+      newValue: {
+        receiptNo,
+        amount: paymentAmount,
+        studentId: student.studentId,
+        commentId: comment._id.toString()
+      },
+      ipAddress: req.ip
+    });
+
+    res.status(201).json({
+      success: true,
+      message: `Successfully created payment of ₹${paymentAmount.toLocaleString('en-IN')} with Receipt #${receiptNo}`,
+      data: {
+        payment,
+        comment
+      }
+    });
+  } catch (error) {
+    console.error('Create payment from comment error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Server error while recording payment' });
+  }
+};

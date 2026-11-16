@@ -33,13 +33,27 @@ const feeDemandSchema = new mongoose.Schema({
   categories: [{
     category: { type: String, required: true },
     amount: { type: Number, required: true, min: 0 },
+    originalAmount: { type: Number, default: null },
+    concession: { type: Number, default: 0, min: 0 },
     frequency: { type: String, enum: ['ONE_TIME', 'ANNUAL', 'SEMESTER', 'CUSTOM'], default: 'ANNUAL' },
     semester: { type: String, default: null },
     activationDate: { type: Date, default: null },
     dueDate: { type: Date, default: null },
     status: { type: String, enum: ['active', 'upcoming', 'paid', 'partially_paid'], default: 'active' }
   }],
-  // Total demand amount (sum of all categories)
+  // Traceable tuition fee concession for this academic year
+  concession: {
+    amount: { type: Number, default: 0, min: 0 },
+    originalTuitionFee: { type: Number, default: 0 },
+    reason: { type: String, trim: true },
+    appliedAt: { type: Date, default: null },
+    appliedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    appliedByName: { type: String },
+    updatedAt: { type: Date, default: null },
+    updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    updatedByName: { type: String }
+  },
+  // Total demand amount (sum of all categories after concession)
   totalDemand: {
     type: Number,
     required: true,

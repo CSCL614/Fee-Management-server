@@ -1,9 +1,54 @@
 const Student = require('../models/Student');
 const Course = require('../models/Course');
+const Payment = require('../models/Payment');
 const FeeDemand = require('../models/FeeDemand');
 const FeeStructure = require('../models/FeeStructure');
 const { calculateFeeSummary, calculateBatchFeeSummaries, generateFeeLedger } = require('../utils/feeCalculator');
 const { createAuditLog, generateId } = require('../utils/helpers');
+const mongoose = require('mongoose');
+const path = require('path');
+const fs = require('fs');
+
+const escapeRegex = (s) => (s ? s.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&') : '');
+
+// Helper to score student match relevance for live search
+function scoreStudent(student, query) {
+  const q = (query || '').toLowerCase().trim();
+  if (!q) return 0;
+  const name = (student.name || '').toLowerCase();
+  const adm = (student.admissionNo || '').toLowerCase();
+  const roll = (student.rollNo || '').toLowerCase();
+  const sid = (student.studentId || '').toLowerCase();
+  const phone = (student.phone || '').replace(/\D/g, '');
+  const qDigits = q.replace(/\D/g, '');
+
+  let score = 0;
+  // Exact matches
+  if (name === q) score += 1000;
+  else if (adm === q || roll === q || sid === q) score += 900;
+  // Name starts with query
+  else if (name.startsWith(q)) score += 800;
+  // Any word in name starts with query (e.g. "Chaitanya Devi" or "Devi Chaitanya")
+  else if (name.split(/\s+/).some(w => w.startsWith(q))) score += 700;
+  // Name contains query
+  else if (name.includes(q)) score += 600;
+  // Admission or roll starts with query
+  else if (adm.startsWith(q) || roll.startsWith(q) || sid.startsWith(q)) score += 500;
+  // Admission or roll contains query
+  else if (adm.includes(q) || roll.includes(q) || sid.includes(q)) score += 400;
+  // Phone match (e.g. last 4 digits or contains)
+  else if (qDigits.length >= 3 && phone.includes(qDigits)) {
+    if (phone.endsWith(qDigits)) score += 350;
+    else score += 300;
+  }
+  // Course / Specialization match
+  else if ((student.course || '').toLowerCase().includes(q)) score += 100;
+  else if ((student.specialization || '').toLowerCase().includes(q)) score += 80;
+  else score += 50;
+
+  if (student.status === 'Active') score += 10;
+  return score;
+}
 
 // @desc    Get all students with filters
 // @route   GET /api/students
@@ -13,17 +58,30 @@ exports.getStudents = async (req, res) => {
 
     const filter = {};
 
-    if (search) {
-      const searchRegex = new RegExp(search, 'i');
-      filter.$or = [
+    if (search && search.trim()) {
+      const trimmed = search.trim();
+      const escaped = trimmed.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const searchRegex = new RegExp(escaped, 'i');
+      const words = trimmed.split(/\s+/).filter(Boolean).map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+      const multiWordRegex = new RegExp(words.map(w => `(?=.*${w})`).join(''), 'i');
+
+      const searchConditions = [
+        { name: multiWordRegex },
         { name: searchRegex },
         { studentId: searchRegex },
         { admissionNo: searchRegex },
-        { phone: searchRegex },
-        { email: searchRegex },
-        { batch: searchRegex },
-        { course: searchRegex }
+        { rollNo: searchRegex },
+        { phone: searchRegex }
       ];
+
+      if (trimmed.length >= 3) {
+        searchConditions.push({ course: searchRegex });
+        searchConditions.push({ specialization: searchRegex });
+        searchConditions.push({ degree: searchRegex });
+        searchConditions.push({ email: searchRegex });
+      }
+
+      filter.$or = searchConditions;
     }
 
     if (level) filter.level = level;
@@ -37,7 +95,7 @@ exports.getStudents = async (req, res) => {
     const limitNum = parseInt(limit);
 
     // Fetch count and paginated students concurrently
-    const [total, students] = await Promise.all([
+    const [total, rawStudents] = await Promise.all([
       Student.countDocuments(filter),
       Student.find(filter)
         .sort({ createdAt: -1 })
@@ -45,6 +103,12 @@ exports.getStudents = async (req, res) => {
         .limit(limitNum)
         .lean()
     ]);
+
+    // If search was performed, sort returned page by relevance score
+    let students = rawStudents;
+    if (search && search.trim()) {
+      students = [...rawStudents].sort((a, b) => scoreStudent(b, search) - scoreStudent(a, search));
+    }
 
     // Batch calculate fee summary for all students in 2 queries total
     const summaryMap = await calculateBatchFeeSummaries(students);
@@ -76,27 +140,49 @@ exports.getStudents = async (req, res) => {
   }
 };
 
-// @desc    Search students (global search)
+// @desc    Search students (global search with relevance scoring)
 // @route   GET /api/students/search
 exports.searchStudents = async (req, res) => {
   try {
-    const { q } = req.query;
-    if (!q || q.length < 2) {
+    const { q, limit = 15 } = req.query;
+    if (!q || !q.trim() || q.trim().length < 1) {
       return res.json({ success: true, data: [] });
     }
 
-    const searchRegex = new RegExp(q, 'i');
-    const students = await Student.find({
-      $or: [
-        { name: searchRegex },
-        { studentId: searchRegex },
-        { admissionNo: searchRegex },
-        { phone: searchRegex },
-        { email: searchRegex },
-        { batch: searchRegex },
-        { course: searchRegex }
-      ]
-    }).limit(10).lean();
+    const trimmed = q.trim();
+    const escaped = trimmed.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const searchRegex = new RegExp(escaped, 'i');
+
+    // Multi-word case-insensitive matching (e.g. "Chaitanya Kumar" matches "ch", "Ch", "CHAI", "chaitanya", "kumar")
+    const words = trimmed.split(/\s+/).filter(Boolean).map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    const multiWordRegex = new RegExp(words.map(w => `(?=.*${w})`).join(''), 'i');
+
+    const orConditions = [
+      { name: multiWordRegex },
+      { name: searchRegex },
+      { studentId: searchRegex },
+      { admissionNo: searchRegex },
+      { rollNo: searchRegex },
+      { phone: searchRegex }
+    ];
+
+    // For queries of length >= 3, also search course, specialization, degree, email
+    if (trimmed.length >= 3) {
+      orConditions.push({ course: searchRegex });
+      orConditions.push({ specialization: searchRegex });
+      orConditions.push({ degree: searchRegex });
+      orConditions.push({ email: searchRegex });
+    }
+
+    // Fetch up to 60 candidate students and rank by relevance score
+    const maxCandidates = 60;
+    const candidates = await Student.find({ $or: orConditions }).limit(maxCandidates).lean();
+
+    // Sort candidates by match precision score
+    candidates.sort((a, b) => scoreStudent(b, trimmed) - scoreStudent(a, trimmed));
+
+    const topLimit = Math.min(parseInt(limit, 10) || 15, 30);
+    const students = candidates.slice(0, topLimit);
 
     // Batch calculate fee summaries for all search matches in 2 queries
     const summaryMap = await calculateBatchFeeSummaries(students);
@@ -107,12 +193,22 @@ exports.searchStudents = async (req, res) => {
         _id: student._id,
         studentId: student.studentId,
         admissionNo: student.admissionNo,
+        rollNo: student.rollNo || null,
         name: student.name,
+        profilePhoto: student.profilePhoto || null,
+        phone: student.phone || '',
+        email: student.email || '',
         course: student.course,
+        specialization: student.specialization || '',
+        degree: student.degree || '',
         level: student.level,
         batch: student.batch,
         currentYear: student.currentYear,
+        currentAcademicYear: student.currentAcademicYear,
+        status: student.status,
         totalPending: summary?.overall?.totalPending || 0,
+        totalPaid: summary?.overall?.totalPaid || 0,
+        totalFee: summary?.overall?.totalFee || 0,
         feeStatus: summary?.overall?.status || 'No Demand'
       };
     });
@@ -266,6 +362,30 @@ exports.createStudent = async (req, res) => {
 
     const studentId = await generateId(Student, 'STU', 'studentId');
 
+    // Determine progression history and academic years up to currentYear
+    const yearMatch = currentYear.match(/^(\d+)/);
+    const currentYearNum = yearMatch ? parseInt(yearMatch[1], 10) : 1;
+    const ayParts = currentAcademicYear.split('-');
+    const currentAyStart = parseInt(ayParts[0], 10) || new Date().getFullYear();
+
+    const enrollmentHistory = [];
+    const yearsProgression = [];
+
+    for (let y = 1; y <= currentYearNum; y++) {
+      const suffix = y === 1 ? 'st' : y === 2 ? 'nd' : y === 3 ? 'rd' : 'th';
+      const yearName = `${y}${suffix} Year`;
+      const yStart = currentAyStart - (currentYearNum - y);
+      const yEnd = (yStart + 1).toString().slice(-2);
+      const ayString = `${yStart}-${yEnd}`;
+
+      yearsProgression.push({ year: yearName, academicYear: ayString, startYear: yStart });
+      enrollmentHistory.push({
+        year: yearName,
+        academicYear: ayString,
+        promotedAt: y === currentYearNum ? new Date() : new Date(`${yStart}-06-15T09:00:00Z`)
+      });
+    }
+
     const student = await Student.create({
       studentId,
       admissionNo: trimmedAdm,
@@ -281,20 +401,17 @@ exports.createStudent = async (req, res) => {
       batchStartYear,
       batchEndYear,
       batch: finalBatch,
-      enrollmentHistory: [{
-        year: currentYear,
-        academicYear: currentAcademicYear,
-        promotedAt: new Date()
-      }],
+      enrollmentHistory,
       email,
       phone,
       fatherName,
       address,
       dateOfBirth,
-      gender
+      gender,
+      profilePhoto: req.body.profilePhoto || null
     });
 
-    // Auto-create fee demand from fee structure if available
+    // Auto-create fee demands from fee structure for all progression years
     const escapeRegex = (s) => (s ? s.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&') : '');
     const courseRegexList = [
       new RegExp(`^${escapeRegex(courseDisplayName)}$`, 'i'),
@@ -303,37 +420,49 @@ exports.createStudent = async (req, res) => {
       new RegExp(`^${escapeRegex(degree.trim())}$`, 'i')
     ];
 
-    const feeStructures = await FeeStructure.find({
-      course: { $in: courseRegexList },
-      year: new RegExp(`^${escapeRegex(currentYear.trim())}$`, 'i'),
-      academicYear: currentAcademicYear.trim(),
-      status: 'active'
-    });
+    const now = new Date();
 
-    if (feeStructures.length > 0) {
-      const now = new Date();
-      const categories = feeStructures.map(fs => ({
-        category: fs.category,
-        amount: fs.amount,
-        frequency: fs.frequency || 'ANNUAL',
-        semester: fs.semester || null,
-        activationDate: fs.activationDate || null,
-        dueDate: fs.dueDate || null,
-        status: (fs.activationDate && new Date(fs.activationDate) > now) ? 'upcoming' : 'active'
-      }));
-      const totalDemand = categories.reduce((sum, c) => sum + c.amount, 0);
-
-      await FeeDemand.create({
-        student: student._id,
-        studentId: student.studentId,
-        academicYear: currentAcademicYear.trim(),
-        year: currentYear.trim(),
-        course: courseDisplayName,
-        level: derivedLevel,
-        categories,
-        totalDemand,
-        createdBy: req.user._id
+    for (const prog of yearsProgression) {
+      let feeStructures = await FeeStructure.find({
+        course: { $in: courseRegexList },
+        year: new RegExp(`^${escapeRegex(prog.year.trim())}$`, 'i'),
+        academicYear: prog.academicYear.trim(),
+        status: 'active'
       });
+
+      // Fallback: If no fee structure found for historical academic year, look for the course's active structure for that year
+      if (feeStructures.length === 0) {
+        feeStructures = await FeeStructure.find({
+          course: { $in: courseRegexList },
+          year: new RegExp(`^${escapeRegex(prog.year.trim())}$`, 'i'),
+          status: 'active'
+        });
+      }
+
+      if (feeStructures.length > 0) {
+        const categories = feeStructures.map(fs => ({
+          category: fs.category,
+          amount: fs.amount,
+          frequency: fs.frequency || 'ANNUAL',
+          semester: fs.semester || null,
+          activationDate: fs.activationDate || null,
+          dueDate: fs.dueDate || null,
+          status: (fs.activationDate && new Date(fs.activationDate) > now) ? 'upcoming' : 'active'
+        }));
+        const totalDemand = categories.reduce((sum, c) => sum + c.amount, 0);
+
+        await FeeDemand.create({
+          student: student._id,
+          studentId: student.studentId,
+          academicYear: prog.academicYear.trim(),
+          year: prog.year.trim(),
+          course: courseDisplayName,
+          level: derivedLevel,
+          categories,
+          totalDemand,
+          createdBy: req.user._id
+        });
+      }
     }
 
     await createAuditLog({
@@ -404,7 +533,7 @@ exports.updateStudent = async (req, res) => {
     const allowedFields = [
       'name', 'email', 'phone', 'fatherName', 'address', 'dateOfBirth', 'gender',
       'status', 'degree', 'specialization', 'course', 'courseId', 'duration',
-      'level', 'currentYear', 'currentAcademicYear', 'batch'
+      'level', 'currentYear', 'currentAcademicYear', 'batch', 'profilePhoto'
     ];
 
     for (const field of allowedFields) {
@@ -700,7 +829,7 @@ exports.getFeeSummary = async (req, res) => {
 // @route   GET /api/students/:id/ledger
 exports.getFeeLedger = async (req, res) => {
   try {
-    const ledger = await generateFeeLedger(req.params.id);
+    const ledger = await generateFeeLedger(req.params.id, req.query);
     res.json({ success: true, data: ledger });
   } catch (error) {
     console.error('Fee ledger error:', error);
@@ -729,5 +858,1033 @@ exports.getCourses = async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// ==========================================
+// REQUIREMENT 2: STUDENT PROFILE PHOTO UPLOAD
+// ==========================================
+
+// @desc    Upload temporary / new student photo before record creation
+// @route   POST /api/students/upload-photo
+exports.uploadTempPhoto = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: 'Please select an image file to upload' });
+    }
+    const ext = path.extname(req.file.originalname) || '.jpg';
+    const fileName = `temp_${Date.now()}_${Math.random().toString(36).substring(2, 8)}${ext}`;
+    
+    // Save to local disk
+    const diskPath = path.join(__dirname, '..', 'uploads', 'profiles', fileName);
+    fs.writeFileSync(diskPath, req.file.buffer);
+
+    // Save to GridFS for cloud/Vercel persistence
+    if (mongoose.connection.readyState === 1) {
+      const bucket = new mongoose.mongo.GridFSBucket(mongoose.connection.db, { bucketName: 'student_photos' });
+      const uploadStream = bucket.openUploadStream(fileName, { contentType: req.file.mimetype });
+      uploadStream.end(req.file.buffer);
+    }
+
+    const photoUrl = `/api/students/photo/${fileName}`;
+    res.json({
+      success: true,
+      data: { photoUrl },
+      message: 'Photo uploaded successfully'
+    });
+  } catch (error) {
+    console.error('Upload temp photo error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Image upload failed' });
+  }
+};
+
+// @desc    Upload or replace photo for an existing student
+// @route   POST /api/students/:id/photo
+exports.uploadStudentPhoto = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: 'Please select an image file to upload' });
+    }
+    const student = await Student.findOne({
+      $or: [
+        { studentId: req.params.id },
+        { _id: req.params.id.match(/^[0-9a-fA-F]{24}$/) ? req.params.id : undefined }
+      ].filter(Boolean)
+    });
+    if (!student) {
+      return res.status(404).json({ success: false, message: 'Student not found' });
+    }
+
+    const ext = path.extname(req.file.originalname) || '.jpg';
+    const fileName = `student_${student.studentId || student._id}_${Date.now()}${ext}`;
+
+    // Save to local disk
+    const diskPath = path.join(__dirname, '..', 'uploads', 'profiles', fileName);
+    fs.writeFileSync(diskPath, req.file.buffer);
+
+    // Save to GridFS for permanent storage across deployments
+    if (mongoose.connection.readyState === 1) {
+      const bucket = new mongoose.mongo.GridFSBucket(mongoose.connection.db, { bucketName: 'student_photos' });
+      const uploadStream = bucket.openUploadStream(fileName, { contentType: req.file.mimetype });
+      uploadStream.end(req.file.buffer);
+    }
+
+    const oldPhoto = student.profilePhoto;
+    student.profilePhoto = `/api/students/photo/${fileName}`;
+    await student.save();
+
+    await createAuditLog({
+      user: req.user._id,
+      userName: req.user.name,
+      userRole: req.user.role,
+      action: 'Student Photo Uploaded',
+      entity: 'Student',
+      entityId: student.studentId,
+      description: `Uploaded profile photo for ${student.name} (${student.admissionNo || student.studentId})`,
+      oldValue: { profilePhoto: oldPhoto },
+      newValue: { profilePhoto: student.profilePhoto },
+      reason: 'Profile photo updated',
+      ipAddress: req.ip
+    });
+
+    res.json({
+      success: true,
+      data: { profilePhoto: student.profilePhoto },
+      message: 'Student profile photo updated successfully'
+    });
+  } catch (error) {
+    console.error('Upload student photo error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Image upload failed' });
+  }
+};
+
+// @desc    Remove photo from student profile
+// @route   DELETE /api/students/:id/photo
+exports.deleteStudentPhoto = async (req, res) => {
+  try {
+    const student = await Student.findOne({
+      $or: [
+        { studentId: req.params.id },
+        { _id: req.params.id.match(/^[0-9a-fA-F]{24}$/) ? req.params.id : undefined }
+      ].filter(Boolean)
+    });
+    if (!student) {
+      return res.status(404).json({ success: false, message: 'Student not found' });
+    }
+
+    const oldPhoto = student.profilePhoto;
+    student.profilePhoto = null;
+    await student.save();
+
+    await createAuditLog({
+      user: req.user._id,
+      userName: req.user.name,
+      userRole: req.user.role,
+      action: 'Student Photo Removed',
+      entity: 'Student',
+      entityId: student.studentId,
+      description: `Removed profile photo for ${student.name} (${student.admissionNo || student.studentId})`,
+      oldValue: { profilePhoto: oldPhoto },
+      newValue: { profilePhoto: null },
+      reason: 'Profile photo removed',
+      ipAddress: req.ip
+    });
+
+    res.json({
+      success: true,
+      message: 'Student profile photo removed successfully'
+    });
+  } catch (error) {
+    console.error('Delete student photo error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Server error' });
+  }
+};
+
+// @desc    Serve student profile photo (from local disk or GridFS)
+// @route   GET /api/students/photo/:filename
+exports.getStudentPhoto = async (req, res) => {
+  try {
+    const fileName = req.params.filename;
+    // Prevent directory traversal
+    const safeFileName = path.basename(fileName);
+    const diskPath = path.join(__dirname, '..', 'uploads', 'profiles', safeFileName);
+
+    if (fs.existsSync(diskPath)) {
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+      return res.sendFile(diskPath);
+    }
+
+    // GridFS fallback
+    if (mongoose.connection.readyState === 1) {
+      const bucket = new mongoose.mongo.GridFSBucket(mongoose.connection.db, { bucketName: 'student_photos' });
+      const files = await bucket.find({ filename: safeFileName }).toArray();
+      if (files.length > 0) {
+        res.setHeader('Content-Type', files[0].contentType || 'image/jpeg');
+        res.setHeader('Cache-Control', 'public, max-age=86400');
+        const downloadStream = bucket.openDownloadStreamByName(safeFileName);
+        return downloadStream.pipe(res);
+      }
+    }
+
+    return res.status(404).json({ success: false, message: 'Photo not found' });
+  } catch (error) {
+    res.status(404).json({ success: false, message: 'Photo not found' });
+  }
+};
+
+// ==========================================
+// REQUIREMENT 3: MULTI-STUDENT SELECTION & BULK DELETION
+// ==========================================
+
+// @desc    Preview multi-student deletion and check financial records
+// @route   POST /api/students/bulk-delete/preview
+exports.previewBulkDelete = async (req, res) => {
+  try {
+    const { studentIds } = req.body;
+    if (!studentIds || !Array.isArray(studentIds) || studentIds.length === 0) {
+      return res.status(400).json({ success: false, message: 'No students selected' });
+    }
+
+    const students = await Student.find({
+      $or: [
+        { studentId: { $in: studentIds } },
+        { _id: { $in: studentIds.filter(id => typeof id === 'string' && id.match(/^[0-9a-fA-F]{24}$/)) } }
+      ]
+    }).lean();
+
+    const previewList = [];
+    let willArchiveCount = 0;
+    let willDeleteCount = 0;
+
+    for (const student of students) {
+      const paymentCount = await Payment.countDocuments({
+        $or: [{ student: student._id }, { studentId: student.studentId }]
+      });
+      const demandCount = await FeeDemand.countDocuments({
+        $or: [{ student: student._id }, { studentId: student.studentId }]
+      });
+
+      const hasFinancialHistory = paymentCount > 0;
+      if (hasFinancialHistory) {
+        willArchiveCount++;
+      } else {
+        willDeleteCount++;
+      }
+
+      previewList.push({
+        _id: student._id,
+        studentId: student.studentId,
+        admissionNo: student.admissionNo,
+        name: student.name,
+        course: student.course,
+        currentYear: student.currentYear,
+        paymentCount,
+        demandCount,
+        hasFinancialHistory,
+        actionType: hasFinancialHistory ? 'archive' : 'delete',
+        note: hasFinancialHistory
+          ? `Has ${paymentCount} recorded payment transaction(s). Will be safely archived to protect financial ledger.`
+          : `0 payment transactions. Can be safely deleted.`
+      });
+    }
+
+    res.json({
+      success: true,
+      data: {
+        totalSelected: students.length,
+        willArchiveCount,
+        willDeleteCount,
+        counts: {
+          total: students.length,
+          archival: willArchiveCount,
+          permanent: willDeleteCount
+        },
+        students: previewList,
+        preview: previewList.map(item => ({
+          ...item,
+          action: item.actionType,
+          hasPayments: item.paymentCount > 0,
+          hasDemands: item.demandCount > 0
+        }))
+      }
+    });
+  } catch (error) {
+    console.error('Preview bulk delete error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Server error' });
+  }
+};
+
+// @desc    Bulk delete or safely archive selected students
+// @route   POST /api/students/bulk-delete
+exports.bulkDeleteStudents = async (req, res) => {
+  try {
+    const { studentIds, reason } = req.body;
+    if (!studentIds || !Array.isArray(studentIds) || studentIds.length === 0) {
+      return res.status(400).json({ success: false, message: 'Please provide at least one student ID' });
+    }
+
+    const students = await Student.find({
+      $or: [
+        { studentId: { $in: studentIds } },
+        { _id: { $in: studentIds.filter(id => typeof id === 'string' && id.match(/^[0-9a-fA-F]{24}$/)) } }
+      ]
+    });
+
+    if (students.length === 0) {
+      return res.status(404).json({ success: false, message: 'No matching students found' });
+    }
+
+    const archivedList = [];
+    const deletedList = [];
+    const auditReason = reason || 'Bulk student deletion initiated by administrator';
+
+    for (const student of students) {
+      const paymentCount = await Payment.countDocuments({
+        $or: [{ student: student._id }, { studentId: student.studentId }]
+      });
+
+      if (paymentCount > 0) {
+        // Safe archival / soft deletion: preserve payments, receipts, demands, ledger
+        student.status = 'Archived';
+        student.isArchived = true;
+        student.archivedAt = new Date();
+        student.archivedBy = req.user._id;
+        student.archiveReason = auditReason;
+        await student.save();
+        archivedList.push(student);
+      } else {
+        // No payments: delete associated unbilled demands and remove student
+        await FeeDemand.deleteMany({
+          $or: [{ student: student._id }, { studentId: student.studentId }]
+        });
+        await Student.deleteOne({ _id: student._id });
+        deletedList.push(student);
+      }
+    }
+
+    // Comprehensive audit log
+    await createAuditLog({
+      user: req.user._id,
+      userName: req.user.name,
+      userRole: req.user.role,
+      action: 'Bulk Student Deletion',
+      entity: 'Student',
+      description: `Bulk deletion executed on ${students.length} students: ${archivedList.length} safely archived (financial records preserved), ${deletedList.length} permanently deleted`,
+      oldValue: {
+        totalRequested: studentIds.length,
+        affectedStudents: students.map(s => ({
+          studentId: s.studentId,
+          admissionNo: s.admissionNo,
+          name: s.name,
+          course: s.course
+        }))
+      },
+      newValue: {
+        archivedCount: archivedList.length,
+        deletedCount: deletedList.length,
+        archivedStudents: archivedList.map(s => s.studentId),
+        deletedStudents: deletedList.map(s => s.studentId)
+      },
+      reason: auditReason,
+      ipAddress: req.ip
+    });
+
+    res.json({
+      success: true,
+      message: `Processed ${students.length} students: ${archivedList.length} safely archived with financial history preserved, ${deletedList.length} permanently deleted.`,
+      data: {
+        totalProcessed: students.length,
+        archivedCount: archivedList.length,
+        deletedCount: deletedList.length,
+        archivedStudents: archivedList.map(s => ({ studentId: s.studentId, name: s.name, admissionNo: s.admissionNo })),
+        deletedStudents: deletedList.map(s => ({ studentId: s.studentId, name: s.name, admissionNo: s.admissionNo }))
+      }
+    });
+  } catch (error) {
+    console.error('Bulk delete error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Server error' });
+  }
+};
+
+// ==========================================
+// REQUIREMENT 6: TUITION FEE CONCESSION
+// ==========================================
+
+// @desc    Get Tuition Fee concession for a student in a specific academic year
+// @route   GET /api/students/:id/concession
+exports.getStudentConcession = async (req, res) => {
+  try {
+    const student = await Student.findOne({
+      $or: [
+        { studentId: req.params.id },
+        { _id: req.params.id.match(/^[0-9a-fA-F]{24}$/) ? req.params.id : undefined }
+      ].filter(Boolean)
+    });
+    if (!student) {
+      return res.status(404).json({ success: false, message: 'Student not found' });
+    }
+
+    const academicYear = req.query.academicYear || student.currentAcademicYear;
+    const demand = await FeeDemand.findOne({
+      student: student._id,
+      academicYear,
+      status: 'active'
+    });
+
+    if (!demand) {
+      return res.json({
+        success: true,
+        data: {
+          hasDemand: false,
+          studentName: student.name,
+          admissionNo: student.admissionNo,
+          course: student.course,
+          studyYear: student.currentYear,
+          academicYear,
+          originalTuitionFee: 0,
+          concessionAmount: 0,
+          adjustedTuitionFee: 0,
+          concession: null
+        }
+      });
+    }
+
+    const tuitionCategory = (demand.categories || []).find(c => (c.category || '').toLowerCase().includes('tuition'));
+    const originalTuitionFee = tuitionCategory
+      ? (tuitionCategory.originalAmount != null ? tuitionCategory.originalAmount : tuitionCategory.amount + (tuitionCategory.concession || demand.concession?.amount || 0))
+      : (demand.concession?.originalTuitionFee || 0);
+
+    const concessionAmount = demand.concession?.amount || (tuitionCategory?.concession || 0);
+    const adjustedTuitionFee = Math.max(0, originalTuitionFee - concessionAmount);
+
+    res.json({
+      success: true,
+      data: {
+        hasDemand: true,
+        studentName: student.name,
+        admissionNo: student.admissionNo,
+        course: student.course,
+        studyYear: demand.year || student.currentYear,
+        academicYear,
+        originalTuitionFee,
+        concessionAmount,
+        adjustedTuitionFee,
+        reason: demand.concession?.reason || '',
+        appliedAt: demand.concession?.appliedAt || null,
+        appliedByName: demand.concession?.appliedByName || '',
+        updatedAt: demand.concession?.updatedAt || null,
+        updatedByName: demand.concession?.updatedByName || ''
+      }
+    });
+  } catch (error) {
+    console.error('Get student concession error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Server error' });
+  }
+};
+
+// @desc    Apply or update Tuition Fee concession on student profile
+// @route   POST /api/students/:id/concession
+exports.updateStudentConcession = async (req, res) => {
+  try {
+    const { academicYear, concessionAmount, reason } = req.body;
+
+    const student = await Student.findOne({
+      $or: [
+        { studentId: req.params.id },
+        { _id: req.params.id.match(/^[0-9a-fA-F]{24}$/) ? req.params.id : undefined }
+      ].filter(Boolean)
+    });
+    if (!student) {
+      return res.status(404).json({ success: false, message: 'Student not found' });
+    }
+
+    const targetAcademicYear = academicYear || student.currentAcademicYear;
+    const demand = await FeeDemand.findOne({
+      student: student._id,
+      academicYear: targetAcademicYear,
+      status: 'active'
+    });
+
+    if (!demand) {
+      return res.status(400).json({
+        success: false,
+        message: `No active fee demand found for academic session ${targetAcademicYear}. Please configure fee structure first.`
+      });
+    }
+
+    const tuitionCategory = (demand.categories || []).find(c => (c.category || '').toLowerCase().includes('tuition'));
+    if (!tuitionCategory) {
+      return res.status(400).json({
+        success: false,
+        message: `No Tuition Fee category found in the assessed fee demand for ${targetAcademicYear}. Concessions apply only to Tuition Fee.`
+      });
+    }
+
+    const originalTuitionFee = tuitionCategory.originalAmount != null
+      ? tuitionCategory.originalAmount
+      : (tuitionCategory.amount + (tuitionCategory.concession || demand.concession?.amount || 0));
+
+    const concession = parseFloat(concessionAmount);
+    if (isNaN(concession) || concession < 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Concession amount must be a valid non-negative number.'
+      });
+    }
+
+    if (concession > originalTuitionFee) {
+      return res.status(400).json({
+        success: false,
+        message: `Concession amount (₹${concession.toLocaleString('en-IN')}) cannot exceed the applicable Tuition Fee (₹${originalTuitionFee.toLocaleString('en-IN')}).`
+      });
+    }
+
+    const adjustedTuitionFee = originalTuitionFee - concession;
+    const prevConcession = demand.concession?.amount || 0;
+
+    // Update the Tuition Fee category
+    tuitionCategory.originalAmount = originalTuitionFee;
+    tuitionCategory.concession = concession;
+    tuitionCategory.amount = adjustedTuitionFee;
+
+    // Update the demand concession tracking subdocument
+    demand.concession = {
+      amount: concession,
+      originalTuitionFee,
+      reason: reason ? reason.trim() : (demand.concession?.reason || ''),
+      appliedAt: demand.concession?.appliedAt || new Date(),
+      appliedBy: demand.concession?.appliedBy || req.user._id,
+      appliedByName: demand.concession?.appliedByName || req.user.name,
+      updatedAt: new Date(),
+      updatedBy: req.user._id,
+      updatedByName: req.user.name
+    };
+
+    // Recalculate total assessed demand
+    demand.totalDemand = demand.categories.reduce((sum, c) => sum + c.amount, 0);
+    await demand.save();
+
+    // Create Audit Log
+    await createAuditLog({
+      user: req.user._id,
+      userName: req.user.name,
+      userRole: req.user.role,
+      action: 'Tuition Fee Concession Updated',
+      entity: 'FeeDemand',
+      entityId: demand._id.toString(),
+      description: `Applied tuition fee concession of ₹${concession.toLocaleString('en-IN')} for ${student.name} (${student.admissionNo || student.studentId}) in ${targetAcademicYear}. Original: ₹${originalTuitionFee.toLocaleString('en-IN')}, Adjusted: ₹${adjustedTuitionFee.toLocaleString('en-IN')}`,
+      oldValue: { previousConcession: prevConcession },
+      newValue: {
+        academicYear: targetAcademicYear,
+        originalTuitionFee,
+        concessionAmount: concession,
+        adjustedTuitionFee,
+        reason: reason || ''
+      },
+      reason: reason || 'Tuition Fee Concession granted',
+      ipAddress: req.ip
+    });
+
+    const updatedSummary = await calculateFeeSummary(student.studentId, targetAcademicYear);
+
+    res.json({
+      success: true,
+      message: `Tuition Fee Concession of ₹${concession.toLocaleString('en-IN')} successfully applied. Adjusted Tuition Fee is ₹${adjustedTuitionFee.toLocaleString('en-IN')}.`,
+      data: {
+        academicYear: targetAcademicYear,
+        originalTuitionFee,
+        concessionAmount: concession,
+        adjustedTuitionFee,
+        concession: demand.concession,
+        summary: updatedSummary
+      }
+    });
+  } catch (error) {
+    console.error('Update student concession error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Server error' });
+  }
+};
+
+/**
+ * @desc    Get graduated / passed-out students with fee summaries and graduation KPIs
+ * @route   GET /api/students/graduated
+ * @access  Admin, Accountant
+ */
+exports.getGraduatedStudents = async (req, res) => {
+  try {
+    const {
+      search,
+      passingYear,
+      passingAcademicYear,
+      course,
+      specialization,
+      resultStatus,
+      feeStatus,
+      page = 1,
+      limit = 20
+    } = req.query;
+
+    const filter = { status: 'Graduated' };
+
+    if (search && search.trim()) {
+      const sRegex = new RegExp(escapeRegex(search.trim()), 'i');
+      filter.$or = [
+        { name: sRegex },
+        { studentId: sRegex },
+        { admissionNo: sRegex },
+        { rollNo: sRegex },
+        { phone: sRegex },
+        { email: sRegex },
+        { course: sRegex },
+        { 'graduation.academicResult.universityRegNo': sRegex }
+      ];
+    }
+
+    if (passingYear && passingYear !== 'All') {
+      filter['graduation.passingYear'] = parseInt(passingYear, 10);
+    }
+
+    if (passingAcademicYear && passingAcademicYear !== 'All') {
+      filter['graduation.passingAcademicYear'] = passingAcademicYear.trim();
+    }
+
+    if (course && course !== 'All') {
+      filter.course = new RegExp(`^${escapeRegex(course.trim())}$`, 'i');
+    }
+
+    if (specialization && specialization !== 'All') {
+      filter.specialization = new RegExp(`^${escapeRegex(specialization.trim())}$`, 'i');
+    }
+
+    if (resultStatus && resultStatus !== 'All') {
+      filter['graduation.academicResult.resultStatus'] = resultStatus;
+    }
+
+    const pageNum = parseInt(page, 10) || 1;
+    const limitNum = parseInt(limit, 10) || 20;
+
+    const currentYear = new Date().getFullYear();
+
+    // Concurrently fetch all matching students, all graduated for baseline KPIs, and top course
+    const [allMatchingStudents, allGraduated, topCourseAgg] = await Promise.all([
+      Student.find(filter)
+        .sort({ 'graduation.passingYear': -1, 'graduation.graduatedAt': -1, name: 1 })
+        .lean(),
+      Student.find({ status: 'Graduated' }, '_id studentId graduation.passingYear').lean(),
+      Student.aggregate([
+        { $match: { status: 'Graduated' } },
+        { $group: { _id: '$course', count: { $sum: 1 } } },
+        { $sort: { count: -1 } },
+        { $limit: 1 }
+      ])
+    ]);
+
+    // Batch calculate fee summaries for all matching graduated students
+    const summaryMap = await calculateBatchFeeSummaries(allMatchingStudents);
+
+    let fullyPaidCount = 0;
+    let notFullyPaidCount = 0;
+    let totalOutstandingBalance = 0;
+    let totalFeeAllMatching = 0;
+    let totalPaidAllMatching = 0;
+
+    const allWithDetails = allMatchingStudents.map(student => {
+      const summary = summaryMap.get(student._id.toString());
+      const totalFee = summary?.overall?.totalFee || 0;
+      const totalPaid = summary?.overall?.totalPaid || 0;
+      const totalPending = summary?.overall?.totalPending || 0;
+      const fStatus = totalPending === 0 ? 'Cleared' : (totalPaid > 0 ? 'Partial' : 'Due');
+
+      totalFeeAllMatching += totalFee;
+      totalPaidAllMatching += totalPaid;
+
+      if (totalPending > 0) {
+        notFullyPaidCount++;
+        totalOutstandingBalance += totalPending;
+      } else {
+        fullyPaidCount++;
+      }
+
+      return {
+        ...student,
+        totalFee,
+        totalPaid,
+        totalPending,
+        feeStatus: fStatus
+      };
+    });
+
+    // Support feeStatus filter: 'due' (only with outstanding balance) or 'paid' (only cleared)
+    let filteredStudents = allWithDetails;
+    if (feeStatus === 'due') {
+      filteredStudents = allWithDetails.filter(s => s.totalPending > 0);
+    } else if (feeStatus === 'paid' || feeStatus === 'cleared') {
+      filteredStudents = allWithDetails.filter(s => s.totalPending === 0);
+    }
+
+    const total = filteredStudents.length;
+    const pageStudents = filteredStudents.slice((pageNum - 1) * limitNum, pageNum * limitNum);
+
+    const graduatedThisYear = allGraduated.filter(g => g.graduation?.passingYear === currentYear).length;
+    const topCourse = topCourseAgg[0] ? `${topCourseAgg[0]._id} (${topCourseAgg[0].count})` : 'N/A';
+
+    res.json({
+      success: true,
+      data: pageStudents,
+      summary: {
+        totalGraduated: allMatchingStudents.length,
+        graduatedThisYear,
+        topCourse,
+        totalOutstandingBalance,
+        fullyPaidCount,
+        notFullyPaidCount,
+        fullyPaidPercentage: allMatchingStudents.length > 0 ? Math.round((fullyPaidCount / allMatchingStudents.length) * 100) : 100,
+        averageOutstandingDue: notFullyPaidCount > 0 ? Math.round(totalOutstandingBalance / notFullyPaidCount) : 0,
+        totalAlumniDemanded: totalFeeAllMatching,
+        totalAlumniCollected: totalPaidAllMatching,
+        collectionRate: totalFeeAllMatching > 0 ? Math.round((totalPaidAllMatching / totalFeeAllMatching) * 100) : 100
+      },
+      pagination: {
+        total,
+        page: pageNum,
+        pages: Math.ceil(total / limitNum) || 1,
+        limit: limitNum
+      }
+    });
+  } catch (error) {
+    console.error('Get graduated students error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Server error' });
+  }
+};
+
+/**
+ * @desc    Get graduation eligibility suggestions for active students
+ * @route   GET /api/students/graduation/suggestions
+ * @access  Admin Only
+ */
+exports.getGraduationSuggestions = async (req, res) => {
+  try {
+    const activeStudents = await Student.find({ status: 'Active' })
+      .populate('courseId')
+      .sort({ course: 1, currentYear: -1, name: 1 })
+      .lean();
+
+    const currentCalendarYear = new Date().getFullYear();
+
+    const suggestions = [];
+
+    for (const student of activeStudents) {
+      const duration = student.duration || (student.level === 'PG' ? 2 : 3);
+      const yearMap = { '1st Year': 1, '2nd Year': 2, '3rd Year': 3, '4th Year': 4, '5th Year': 5, '6th Year': 6 };
+      const numericYear = yearMap[student.currentYear] || 1;
+
+      // Admission year check
+      const admissionYear = student.admissionYear || student.batchStartYear || null;
+      const expectedEndYear = admissionYear ? admissionYear + duration : (student.batchEndYear || null);
+
+      let isEligible = false;
+      const reasons = [];
+
+      // Reason 1: Currently enrolled in final year or above
+      if (numericYear >= duration) {
+        isEligible = true;
+        reasons.push(`Student is in ${student.currentYear} of a ${duration}-year course`);
+      }
+
+      // Reason 2: Expected completion year reached or passed
+      if (expectedEndYear && expectedEndYear <= currentCalendarYear) {
+        isEligible = true;
+        reasons.push(`Course duration completed (Batch: ${student.batch || `${admissionYear}-${expectedEndYear}`})`);
+      }
+
+      if (isEligible) {
+        suggestions.push({
+          _id: student._id,
+          studentId: student.studentId,
+          admissionNo: student.admissionNo,
+          name: student.name,
+          course: student.course,
+          specialization: student.specialization,
+          level: student.level,
+          currentYear: student.currentYear,
+          currentAcademicYear: student.currentAcademicYear,
+          admissionYear: admissionYear || (student.batchStartYear || null),
+          duration,
+          suggestedPassingYear: expectedEndYear || currentCalendarYear,
+          suggestedPassingAcademicYear: student.currentAcademicYear || `${currentCalendarYear - 1}-${String(currentCalendarYear).slice(-2)}`,
+          reasons
+        });
+      }
+    }
+
+    // Attach fee summary for suggested students
+    const summaryMap = await calculateBatchFeeSummaries(suggestions);
+    const enrichedSuggestions = suggestions.map(s => {
+      const summary = summaryMap.get(s._id.toString());
+      return {
+        ...s,
+        totalFee: summary?.overall?.totalFee || 0,
+        totalPaid: summary?.overall?.totalPaid || 0,
+        totalPending: summary?.overall?.totalPending || 0,
+        feeStatus: summary?.overall?.status || 'No Demand'
+      };
+    });
+
+    res.json({
+      success: true,
+      data: enrichedSuggestions,
+      count: enrichedSuggestions.length
+    });
+  } catch (error) {
+    console.error('Get graduation suggestions error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Server error' });
+  }
+};
+
+/**
+ * @desc    Graduate an active student (transition to Alumni / Graduated)
+ * @route   POST /api/students/:id/graduate
+ * @access  Admin Only
+ */
+exports.graduateStudent = async (req, res) => {
+  try {
+    const student = await Student.findById(req.params.id);
+    if (!student) {
+      return res.status(404).json({ success: false, message: 'Student not found' });
+    }
+
+    if (student.status === 'Graduated') {
+      return res.status(400).json({ success: false, message: 'Student is already marked as Graduated' });
+    }
+
+    const {
+      passingYear,
+      passingAcademicYear,
+      completionDate,
+      graduationRemarks,
+      academicResult = {}
+    } = req.body;
+
+    const resolvedPassingYear = parseInt(passingYear, 10) || new Date().getFullYear();
+    const resolvedAcademicYear = passingAcademicYear || student.currentAcademicYear || `${resolvedPassingYear - 1}-${String(resolvedPassingYear).slice(-2)}`;
+    const resolvedCompletionDate = completionDate ? new Date(completionDate) : new Date();
+
+    student.status = 'Graduated';
+    student.graduation = {
+      passingYear: resolvedPassingYear,
+      passingAcademicYear: resolvedAcademicYear,
+      completionDate: isNaN(resolvedCompletionDate.getTime()) ? new Date() : resolvedCompletionDate,
+      graduatedAt: new Date(),
+      graduatedBy: req.user._id,
+      graduatedByName: req.user.name,
+      graduationRemarks: graduationRemarks ? graduationRemarks.trim() : '',
+      academicResult: {
+        course: academicResult.course || student.course,
+        specialization: academicResult.specialization || student.specialization,
+        admissionYear: academicResult.admissionYear || student.admissionYear || student.batchStartYear,
+        passingYear: academicResult.passingYear || resolvedPassingYear,
+        finalSemester: academicResult.finalSemester || 'Semester VI',
+        resultStatus: academicResult.resultStatus || 'Passed',
+        percentage: academicResult.percentage !== undefined && academicResult.percentage !== '' ? parseFloat(academicResult.percentage) : null,
+        cgpa: academicResult.cgpa !== undefined && academicResult.cgpa !== '' ? parseFloat(academicResult.cgpa) : null,
+        gradeOrDivision: academicResult.gradeOrDivision || '',
+        universityRegNo: academicResult.universityRegNo || '',
+        resultDate: academicResult.resultDate ? new Date(academicResult.resultDate) : null,
+        remarks: academicResult.remarks || ''
+      },
+      restorationHistory: student.graduation?.restorationHistory || []
+    };
+
+    await student.save();
+
+    await createAuditLog({
+      user: req.user._id,
+      userName: req.user.name,
+      userRole: req.user.role,
+      action: 'Student Graduated',
+      entity: 'Student',
+      entityId: student._id.toString(),
+      description: `Graduated student ${student.name} (${student.admissionNo || student.studentId}). Passing Year: ${resolvedPassingYear}, Academic Year: ${resolvedAcademicYear}. Financial ledger & dues preserved.`,
+      newValue: {
+        status: 'Graduated',
+        graduation: student.graduation
+      },
+      reason: graduationRemarks || 'Graduation completed',
+      ipAddress: req.ip
+    });
+
+    const summary = await calculateFeeSummary(student.studentId);
+
+    res.json({
+      success: true,
+      message: `Student ${student.name} has been successfully graduated with passing year ${resolvedPassingYear}.`,
+      data: {
+        student,
+        summary
+      }
+    });
+  } catch (error) {
+    console.error('Graduate student error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Server error' });
+  }
+};
+
+/**
+ * @desc    Restore a graduated student back to Active status
+ * @route   POST /api/students/:id/restore
+ * @access  Admin Only
+ */
+exports.restoreStudent = async (req, res) => {
+  try {
+    const student = await Student.findById(req.params.id);
+    if (!student) {
+      return res.status(404).json({ success: false, message: 'Student not found' });
+    }
+
+    if (student.status !== 'Graduated') {
+      return res.status(400).json({ success: false, message: `Only graduated students can be restored. Current status is "${student.status}".` });
+    }
+
+    const { reason, targetYear, targetAcademicYear } = req.body;
+
+    if (!reason || reason.trim().length < 5) {
+      return res.status(400).json({
+        success: false,
+        message: 'A mandatory reason (minimum 5 characters) is required to restore a graduated student.'
+      });
+    }
+
+    const prevGraduation = student.graduation ? student.graduation.toObject() : {};
+
+    student.status = 'Active';
+    if (targetYear) student.currentYear = targetYear;
+    if (targetAcademicYear) student.currentAcademicYear = targetAcademicYear;
+
+    if (!student.graduation) {
+      student.graduation = {};
+    }
+    if (!student.graduation.restorationHistory) {
+      student.graduation.restorationHistory = [];
+    }
+
+    student.graduation.restorationHistory.push({
+      restoredAt: new Date(),
+      restoredBy: req.user._id,
+      restoredByName: req.user.name,
+      reason: reason.trim(),
+      previousStatus: 'Graduated'
+    });
+
+    await student.save();
+
+    await createAuditLog({
+      user: req.user._id,
+      userName: req.user.name,
+      userRole: req.user.role,
+      action: 'Student Restored from Graduation',
+      entity: 'Student',
+      entityId: student._id.toString(),
+      description: `Restored ${student.name} (${student.admissionNo || student.studentId}) from Graduated to Active status. Reason: ${reason.trim()}`,
+      oldValue: { status: 'Graduated', graduation: prevGraduation },
+      newValue: {
+        status: 'Active',
+        currentYear: student.currentYear,
+        currentAcademicYear: student.currentAcademicYear,
+        restoredBy: req.user.name,
+        restorationReason: reason.trim()
+      },
+      reason: reason.trim(),
+      ipAddress: req.ip
+    });
+
+    res.json({
+      success: true,
+      message: `Student ${student.name} has been restored to Active status.`,
+      data: student
+    });
+  } catch (error) {
+    console.error('Restore student error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Server error' });
+  }
+};
+
+/**
+ * @desc    Update academic results for a graduated student
+ * @route   PUT /api/students/:id/academic-results
+ * @access  Admin Only
+ */
+exports.updateAcademicResults = async (req, res) => {
+  try {
+    const student = await Student.findById(req.params.id);
+    if (!student) {
+      return res.status(404).json({ success: false, message: 'Student not found' });
+    }
+
+    const {
+      course,
+      specialization,
+      admissionYear,
+      passingYear,
+      finalSemester,
+      resultStatus,
+      percentage,
+      cgpa,
+      gradeOrDivision,
+      universityRegNo,
+      resultDate,
+      remarks
+    } = req.body;
+
+    if (!student.graduation) {
+      student.graduation = {
+        passingYear: passingYear || new Date().getFullYear(),
+        completionDate: new Date()
+      };
+    }
+
+    const prevResult = student.graduation.academicResult ? student.graduation.academicResult.toObject() : {};
+
+    student.graduation.academicResult = {
+      course: course || student.graduation.academicResult?.course || student.course,
+      specialization: specialization || student.graduation.academicResult?.specialization || student.specialization,
+      admissionYear: admissionYear !== undefined ? admissionYear : (student.graduation.academicResult?.admissionYear || student.admissionYear),
+      passingYear: passingYear !== undefined ? parseInt(passingYear, 10) : (student.graduation.academicResult?.passingYear || student.graduation.passingYear),
+      finalSemester: finalSemester || student.graduation.academicResult?.finalSemester || 'Final Semester',
+      resultStatus: resultStatus || student.graduation.academicResult?.resultStatus || 'Passed',
+      percentage: percentage !== undefined ? (percentage === '' ? null : parseFloat(percentage)) : student.graduation.academicResult?.percentage,
+      cgpa: cgpa !== undefined ? (cgpa === '' ? null : parseFloat(cgpa)) : student.graduation.academicResult?.cgpa,
+      gradeOrDivision: gradeOrDivision !== undefined ? gradeOrDivision : student.graduation.academicResult?.gradeOrDivision,
+      universityRegNo: universityRegNo !== undefined ? universityRegNo : student.graduation.academicResult?.universityRegNo,
+      resultDate: resultDate ? new Date(resultDate) : (student.graduation.academicResult?.resultDate || null),
+      remarks: remarks !== undefined ? remarks : student.graduation.academicResult?.remarks
+    };
+
+    if (passingYear) {
+      student.graduation.passingYear = parseInt(passingYear, 10);
+    }
+
+    await student.save();
+
+    await createAuditLog({
+      user: req.user._id,
+      userName: req.user.name,
+      userRole: req.user.role,
+      action: 'Academic Results Updated',
+      entity: 'Student',
+      entityId: student._id.toString(),
+      description: `Updated academic results for graduated student ${student.name} (${student.admissionNo || student.studentId}). Status: ${student.graduation.academicResult.resultStatus}, Percentage: ${student.graduation.academicResult.percentage}%`,
+      oldValue: prevResult,
+      newValue: student.graduation.academicResult,
+      ipAddress: req.ip
+    });
+
+    res.json({
+      success: true,
+      message: `Academic results for ${student.name} updated successfully.`,
+      data: student.graduation.academicResult
+    });
+  } catch (error) {
+    console.error('Update academic results error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Server error' });
   }
 };

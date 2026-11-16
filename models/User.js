@@ -34,6 +34,30 @@ const userSchema = new mongoose.Schema({
     type: String,
     enum: ['active', 'inactive'],
     default: 'active'
+  },
+  email: {
+    type: String,
+    trim: true,
+    lowercase: true,
+    default: null
+  },
+  phone: {
+    type: String,
+    trim: true,
+    default: null
+  },
+  isDeleted: {
+    type: Boolean,
+    default: false
+  },
+  deletedAt: {
+    type: Date,
+    default: null
+  },
+  deletedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null
   }
 }, {
   timestamps: true
@@ -41,6 +65,7 @@ const userSchema = new mongoose.Schema({
 
 userSchema.index({ role: 1 });
 userSchema.index({ status: 1 });
+userSchema.index({ isDeleted: 1 });
 
 userSchema.pre('save', async function (next) {
   if (!this.isModified('password')) return next();

@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const FeeDemand = require('../models/FeeDemand');
 const Payment = require('../models/Payment');
 const Student = require('../models/Student');
@@ -8,7 +9,9 @@ const Student = require('../models/Student');
  */
 function computeStudentSummary(student, demands = [], payments = [], targetAcademicYear = null, now = new Date()) {
   const sortedDemands = [...demands].sort((a, b) => (a.academicYear || '').localeCompare(b.academicYear || ''));
-  const sortedPayments = [...payments].sort((a, b) => new Date(a.paymentDate) - new Date(b.paymentDate));
+  // Strictly filter only completed payments for all financial accounting calculations (exclude cancelled, pending, refunded)
+  const validPayments = (payments || []).filter(p => !p.status || p.status === 'completed');
+  const sortedPayments = [...validPayments].sort((a, b) => new Date(a.paymentDate) - new Date(b.paymentDate));
 
   const yearSummaries = [];
   let cumulativeCarryForward = 0;
@@ -24,11 +27,13 @@ function computeStudentSummary(student, demands = [], payments = [], targetAcade
     const upcomingDemandTotal = upcomingCategoriesRaw.reduce((sum, c) => sum + (c.amount || 0), 0);
 
     const currentYearFee = activeDemandTotal;
-    const previousYearDue = cumulativeCarryForward;
-    const totalPayable = currentYearFee + previousYearDue;
+    // Decoupled Academic Years: Previous year dues are preserved in their respective academic year
+    // and are never added to current year's assessed fee demand or payable balance.
+    const previousYearDue = 0;
+    const totalPayable = currentYearFee;
     const totalPaid = totalPaidForYear;
-    const pending = Math.max(0, totalPayable - totalPaid);
-    const advanceCredit = totalPaid > totalPayable ? totalPaid - totalPayable : 0;
+    const pending = Math.max(0, currentYearFee - totalPaid);
+    const advanceCredit = totalPaid > currentYearFee ? totalPaid - currentYearFee : 0;
 
     let status = 'Due';
     if (pending === 0) status = 'Paid';
@@ -70,10 +75,16 @@ function computeStudentSummary(student, demands = [], payments = [], targetAcade
       else if (paid > 0) catStatus = 'Partial';
       if (isUpcoming && paid === 0) catStatus = 'upcoming';
 
+      const isTuition = (c.category || '').toLowerCase().includes('tuition');
+      const catConcession = isTuition ? (c.concession || demand.concession?.amount || 0) : (c.concession || 0);
+      const originalAmount = c.originalAmount != null ? c.originalAmount : (catConcession > 0 ? c.amount + catConcession : c.amount);
+
       return {
         _id: c._id,
         category: c.category,
         amount: c.amount,
+        originalAmount,
+        concession: catConcession,
         frequency: c.frequency || 'ANNUAL',
         semester: c.semester || null,
         activationDate: c.activationDate || null,
@@ -93,18 +104,21 @@ function computeStudentSummary(student, demands = [], payments = [], targetAcade
       year: demand.year,
       course: demand.course,
       level: demand.level,
+      concession: demand.concession || { amount: 0, originalTuitionFee: 0 },
       currentYearFee,
+      assessedFee: currentYearFee,
       upcomingFeeTotal: upcomingDemandTotal,
       previousYearDue,
       totalPayable,
       totalPaid,
+      paid: totalPaid,
       pending,
       advanceCredit,
       status,
       categories: categoryBalances,
       activeCategories,
       upcomingCategories,
-      payments: yearPayments.map(p => ({
+      payments: (payments || []).filter(p => p.academicYear === demand.academicYear).map(p => ({
         receiptNo: p.receiptNo,
         amountPaid: p.amountPaid,
         paymentDate: p.paymentDate,
@@ -125,9 +139,9 @@ function computeStudentSummary(student, demands = [], payments = [], targetAcade
     ? yearSummaries.find(s => s.academicYear === targetAcademicYear)
     : yearSummaries[yearSummaries.length - 1];
 
-  const totalFeeAllYears = yearSummaries.reduce((sum, d) => sum + d.currentYearFee, 0);
+  const totalFeeAllYears = yearSummaries.reduce((sum, d) => sum + (d.currentYearFee || 0), 0);
   const totalPaidAllYears = sortedPayments.reduce((sum, p) => sum + (p.amountPaid || 0), 0);
-  const totalPendingAllYears = Math.max(0, totalFeeAllYears - totalPaidAllYears);
+  const totalPendingAllYears = yearSummaries.reduce((sum, d) => sum + (d.pending || 0), 0);
   const totalAdvanceCredit = totalPaidAllYears > totalFeeAllYears ? totalPaidAllYears - totalFeeAllYears : 0;
 
   let overallStatus = 'Due';
@@ -252,12 +266,13 @@ async function calculateFeeSummary(studentId, targetAcademicYear = null) {
  * Generate fee ledger entries for a student.
  * Uses parallel queries and .lean() for low-latency response.
  */
-async function generateFeeLedger(studentId) {
+async function generateFeeLedger(studentId, filters = {}) {
+  const isObjectId = mongoose.isValidObjectId(studentId);
   const student = await Student.findOne({
     $or: [
-      { studentId },
-      { _id: typeof studentId === 'string' && studentId.match(/^[0-9a-fA-F]{24}$/) ? studentId : undefined }
-    ].filter(Boolean)
+      { studentId: String(studentId) },
+      ...(isObjectId ? [{ _id: studentId }] : [])
+    ]
   }).lean();
 
   if (!student) throw new Error('Student not found');
@@ -275,7 +290,7 @@ async function generateFeeLedger(studentId) {
     Payment.find({
       student: student._id,
       status: 'cancelled'
-    }).sort({ cancelledAt: 1 }).lean()
+    }).sort({ cancelledAt: 1, createdAt: 1 }).lean()
   ]);
 
   // Merge into a single chronological ledger
@@ -284,112 +299,285 @@ async function generateFeeLedger(studentId) {
   // Add demand entries (debits by category)
   for (const demand of demands) {
     if (demand.categories && demand.categories.length > 0) {
-      for (const cat of demand.categories) {
-        entries.push({
-          date: cat.activationDate || demand.createdAt,
-          type: 'demand',
-          category: cat.category,
-          semester: cat.semester || null,
-          description: `${cat.category}${cat.semester ? ` (${cat.semester})` : ''} assessed`,
-          debit: cat.amount,
-          credit: 0,
-          academicYear: demand.academicYear,
-          year: demand.year,
-          referenceId: demand._id
-        });
+      let concessionAppliedForDemand = false;
+      for (let cIdx = 0; cIdx < demand.categories.length; cIdx++) {
+        const cat = demand.categories[cIdx];
+        const isTuition = (cat.category || '').toLowerCase().includes('tuition');
+        if (isTuition && demand.concession && demand.concession.amount > 0 && !concessionAppliedForDemand) {
+          const originalAmt = cat.originalAmount != null ? cat.originalAmount : (cat.amount + demand.concession.amount);
+          entries.push({
+            id: `dem_${demand._id}_${cIdx}_orig`,
+            demandId: demand._id,
+            date: cat.activationDate || demand.createdAt,
+            type: 'demand',
+            receiptNo: null,
+            transactionId: null,
+            category: cat.category,
+            feeCategory: cat.category,
+            semester: cat.semester || null,
+            description: `${cat.category}${cat.semester ? ` (${cat.semester})` : ''} assessed (Original Demand)`,
+            paymentMethod: '—',
+            paymentMode: '—',
+            debit: originalAmt,
+            credit: 0,
+            academicYear: demand.academicYear,
+            year: demand.year,
+            referenceId: demand._id,
+            status: 'active',
+            recordedBy: 'Fee Assessment Rule',
+            remarks: 'Original fee demand assessment'
+          });
+          entries.push({
+            id: `dem_${demand._id}_concession`,
+            demandId: demand._id,
+            date: demand.concession.appliedAt || cat.activationDate || demand.createdAt,
+            type: 'concession',
+            receiptNo: null,
+            transactionId: null,
+            category: 'Tuition Fee',
+            feeCategory: 'Tuition Fee',
+            semester: cat.semester || null,
+            description: `Tuition Fee Concession${demand.concession.reason ? ` - ${demand.concession.reason}` : ''} (Adjustment)`,
+            paymentMethod: 'Fee Waiver / Concession',
+            paymentMode: 'Concession',
+            debit: -demand.concession.amount,
+            credit: 0,
+            academicYear: demand.academicYear,
+            year: demand.year,
+            referenceId: demand._id,
+            status: 'applied',
+            recordedBy: demand.concession.appliedByName || 'Administrator',
+            remarks: demand.concession.reason || 'Tuition concession adjustment'
+          });
+          concessionAppliedForDemand = true;
+        } else {
+          entries.push({
+            id: `dem_${demand._id}_${cIdx}`,
+            demandId: demand._id,
+            date: cat.activationDate || demand.createdAt,
+            type: 'demand',
+            receiptNo: null,
+            transactionId: null,
+            category: cat.category,
+            feeCategory: cat.category,
+            semester: cat.semester || null,
+            description: `${cat.category}${cat.semester ? ` (${cat.semester})` : ''} assessed`,
+            paymentMethod: '—',
+            paymentMode: '—',
+            debit: cat.amount,
+            credit: 0,
+            academicYear: demand.academicYear,
+            year: demand.year,
+            referenceId: demand._id,
+            status: 'active',
+            recordedBy: 'Fee Assessment Rule',
+            remarks: 'Fee demand assessment'
+          });
+        }
       }
     } else {
+      const origDemand = demand.concession && demand.concession.amount > 0 ? demand.totalDemand + demand.concession.amount : demand.totalDemand;
       entries.push({
+        id: `dem_${demand._id}_total`,
+        demandId: demand._id,
         date: demand.createdAt,
         type: 'demand',
+        receiptNo: null,
+        transactionId: null,
         category: 'Fee Assessment',
+        feeCategory: 'Fee Assessment',
         semester: null,
         description: `Fee Demand assessed - ${demand.year} (${demand.academicYear})`,
-        debit: demand.totalDemand,
+        paymentMethod: '—',
+        paymentMode: '—',
+        debit: origDemand,
         credit: 0,
         academicYear: demand.academicYear,
         year: demand.year,
-        referenceId: demand._id
+        referenceId: demand._id,
+        status: 'active',
+        recordedBy: 'Fee Assessment Rule',
+        remarks: 'Annual fee demand'
       });
+      if (demand.concession && demand.concession.amount > 0) {
+        entries.push({
+          id: `dem_${demand._id}_concession`,
+          demandId: demand._id,
+          date: demand.concession.appliedAt || demand.createdAt,
+          type: 'concession',
+          receiptNo: null,
+          transactionId: null,
+          category: 'Tuition Fee',
+          feeCategory: 'Tuition Fee',
+          semester: null,
+          description: `Tuition Fee Concession${demand.concession.reason ? ` - ${demand.concession.reason}` : ''} (Adjustment)`,
+          paymentMethod: 'Fee Waiver / Concession',
+          paymentMode: 'Concession',
+          debit: -demand.concession.amount,
+          credit: 0,
+          academicYear: demand.academicYear,
+          year: demand.year,
+          referenceId: demand._id,
+          status: 'applied',
+          recordedBy: demand.concession.appliedByName || 'Administrator',
+          remarks: demand.concession.reason || 'Tuition concession adjustment'
+        });
+      }
     }
   }
 
-  // Add payment entries (credits by allocation category)
+  // Add payment entries (credits by allocation category - preserves each individual payment transaction)
   for (const payment of payments) {
     if (payment.allocations && payment.allocations.length > 0) {
-      for (const alloc of payment.allocations) {
+      for (let aIdx = 0; aIdx < payment.allocations.length; aIdx++) {
+        const alloc = payment.allocations[aIdx];
         entries.push({
+          id: `pay_${payment._id}_${aIdx}`,
+          paymentId: payment._id,
           date: payment.paymentDate,
           type: 'payment',
+          receiptNo: payment.receiptNo,
+          transactionId: payment.transactionId || payment.receiptNo,
           category: alloc.category,
+          feeCategory: alloc.category,
           semester: alloc.semester || payment.semester || null,
           description: `${alloc.category}${alloc.semester ? ` (${alloc.semester})` : ''} payment - ${payment.paymentMode} (${payment.receiptNo})`,
+          paymentMethod: payment.paymentMode,
+          paymentMode: payment.paymentMode,
           debit: 0,
           credit: alloc.amount,
           academicYear: alloc.academicYear || payment.academicYear,
           year: alloc.year || payment.year,
           referenceId: payment.receiptNo,
-          receiptNo: payment.receiptNo,
-          allocations: payment.allocations
+          status: 'completed',
+          recordedBy: payment.enteredByName || 'Cashier',
+          remarks: payment.remarks || '',
+          allocations: payment.allocations,
+          totalReceiptAmount: payment.amountPaid
         });
       }
     } else {
       entries.push({
+        id: `pay_${payment._id}_0`,
+        paymentId: payment._id,
         date: payment.paymentDate,
         type: 'payment',
+        receiptNo: payment.receiptNo,
+        transactionId: payment.transactionId || payment.receiptNo,
         category: payment.feeCategory || 'Tuition Fee',
+        feeCategory: payment.feeCategory || 'Tuition Fee',
         semester: payment.semester || null,
         description: `${payment.feeCategory ? `${payment.feeCategory} payment` : 'Payment'} - ${payment.paymentMode} (${payment.receiptNo})`,
+        paymentMethod: payment.paymentMode,
+        paymentMode: payment.paymentMode,
         debit: 0,
         credit: payment.amountPaid,
         academicYear: payment.academicYear,
         year: payment.year,
         referenceId: payment.receiptNo,
-        receiptNo: payment.receiptNo,
-        allocations: []
+        status: 'completed',
+        recordedBy: payment.enteredByName || 'Cashier',
+        remarks: payment.remarks || '',
+        allocations: [],
+        totalReceiptAmount: payment.amountPaid
       });
     }
   }
 
-  // Add cancelled payment entries for transparency
+  // Add cancelled payment entries for transparency (with distinct cancelled status and audit trail)
   for (const payment of cancelledPayments) {
     const catName = payment.feeCategory || (payment.allocations?.[0]?.category) || 'Tuition Fee';
+    // 1. Original transaction record marked Cancelled
     entries.push({
+      id: `pay_canc_${payment._id}`,
+      paymentId: payment._id,
       date: payment.paymentDate,
       type: 'payment',
+      receiptNo: payment.receiptNo,
+      transactionId: payment.transactionId || payment.receiptNo,
       category: catName,
+      feeCategory: catName,
       semester: payment.semester || null,
-      description: `${catName} payment - ${payment.paymentMode} (${payment.receiptNo})`,
+      description: `${catName} payment - ${payment.paymentMode} (${payment.receiptNo}) [CANCELLED]`,
+      paymentMethod: payment.paymentMode,
+      paymentMode: payment.paymentMode,
       debit: 0,
       credit: payment.amountPaid,
       academicYear: payment.academicYear,
       year: payment.year,
       referenceId: payment.receiptNo,
-      receiptNo: payment.receiptNo
+      status: 'cancelled',
+      recordedBy: payment.enteredByName || 'Cashier',
+      remarks: payment.remarks ? `[CANCELLED: ${payment.cancelReason || 'Reversed'}] ${payment.remarks}` : `Payment Cancelled: ${payment.cancelReason || 'Reversed'}`,
+      allocations: payment.allocations || [],
+      totalReceiptAmount: payment.amountPaid
     });
+
+    // 2. Cancellation reversal debit on cancellation date
     entries.push({
+      id: `rev_canc_${payment._id}`,
+      paymentId: payment._id,
       date: payment.cancelledAt || payment.updatedAt,
       type: 'cancellation',
+      receiptNo: payment.receiptNo,
+      transactionId: payment.transactionId || payment.receiptNo,
       category: catName,
+      feeCategory: catName,
       semester: payment.semester || null,
-      description: `Payment Cancelled (${payment.receiptNo}) - ${payment.cancelReason || 'Reversal'}`,
+      description: `Payment Cancelled / Reversal (${payment.receiptNo}) - ${payment.cancelReason || 'Reversal'}`,
+      paymentMethod: payment.paymentMode,
+      paymentMode: payment.paymentMode,
       debit: payment.amountPaid,
       credit: 0,
       academicYear: payment.academicYear,
       year: payment.year,
       referenceId: payment.receiptNo,
-      receiptNo: payment.receiptNo
+      status: 'cancelled',
+      recordedBy: payment.cancelledByName || 'Administrator',
+      remarks: `Reversal of receipt ${payment.receiptNo}. Reason: ${payment.cancelReason || 'Administrative Cancellation'}`
     });
   }
 
-  // Sort chronologically
-  entries.sort((a, b) => new Date(a.date) - new Date(b.date));
+  // Sort chronologically:
+  // Primary sort by date
+  // Secondary sort: demands (debit) before payments (credit) on the same date
+  entries.sort((a, b) => {
+    const diff = new Date(a.date).getTime() - new Date(b.date).getTime();
+    if (diff !== 0) return diff;
+    if (a.type === 'demand' && b.type !== 'demand') return -1;
+    if (a.type !== 'demand' && b.type === 'demand') return 1;
+    return 0;
+  });
 
-  // Calculate running balance
+  // Calculate chronological running balance
   let runningBalance = 0;
   for (const entry of entries) {
-    runningBalance += entry.debit - entry.credit;
+    runningBalance += (entry.debit || 0) - (entry.credit || 0);
     entry.balance = runningBalance;
+    entry.runningBalance = runningBalance;
+  }
+
+  // Filter entries if filters are supplied
+  let filteredEntries = entries;
+  if (filters && Object.keys(filters).length > 0) {
+    filteredEntries = entries.filter(e => {
+      if (filters.academicYear && e.academicYear !== filters.academicYear) return false;
+      if (filters.category && e.category !== filters.category && e.feeCategory !== filters.category) return false;
+      if (filters.paymentMode && e.paymentMode !== filters.paymentMode && e.paymentMethod !== filters.paymentMode) return false;
+      if (filters.status && e.status !== filters.status) return false;
+      if (filters.dateFrom && new Date(e.date) < new Date(filters.dateFrom)) return false;
+      if (filters.dateTo && new Date(e.date) > new Date(filters.dateTo + 'T23:59:59.999Z')) return false;
+      if (filters.search) {
+        const q = filters.search.toLowerCase();
+        const matches = (e.receiptNo && e.receiptNo.toLowerCase().includes(q)) ||
+                        (e.transactionId && e.transactionId.toLowerCase().includes(q)) ||
+                        (e.description && e.description.toLowerCase().includes(q)) ||
+                        (e.category && e.category.toLowerCase().includes(q)) ||
+                        (e.recordedBy && e.recordedBy.toLowerCase().includes(q));
+        if (!matches) return false;
+      }
+      return true;
+    });
   }
 
   return {
@@ -398,9 +586,15 @@ async function generateFeeLedger(studentId) {
       name: student.name,
       admissionNo: student.admissionNo,
       course: student.course,
-      level: student.level
+      level: student.level,
+      status: student.status
     },
-    entries,
+    entries: filteredEntries,
+    allEntries: entries,
+    totalDebits: entries.reduce((s, e) => s + (e.debit > 0 ? e.debit : 0), 0),
+    totalCredits: entries.reduce((s, e) => s + (e.credit > 0 && e.status === 'completed' ? e.credit : 0), 0),
+    filteredDebits: filteredEntries.reduce((s, e) => s + (e.debit > 0 ? e.debit : 0), 0),
+    filteredCredits: filteredEntries.reduce((s, e) => s + (e.credit > 0 && e.status === 'completed' ? e.credit : 0), 0),
     closingBalance: runningBalance
   };
 }

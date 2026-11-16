@@ -559,13 +559,16 @@ exports.generateDemoFeeStructures = async (req, res) => {
     }
 
     // 2. Ensure academic year exists in AcademicYear collection
+    const ayStartYear = parseInt(academicYear.split('-')[0]) || 2026;
+    const ayEndYear = ayStartYear + 1;
+
     const ayDoc = await AcademicYear.findOne({ year: academicYear });
     if (!ayDoc) {
       await AcademicYear.create({
         year: academicYear,
-        startDate: new Date('2026-06-01'),
-        endDate: new Date('2027-05-31'),
-        isCurrent: true,
+        startDate: new Date(`${ayStartYear}-06-01`),
+        endDate: new Date(`${ayEndYear}-05-31`),
+        isCurrent: academicYear === '2026-27',
         status: 'active'
       });
     }
@@ -614,48 +617,48 @@ exports.generateDemoFeeStructures = async (req, res) => {
             amount: 30000,
             frequency: 'ANNUAL',
             semester: null,
-            activationDate: new Date('2026-06-01'),
-            dueDate: new Date('2026-07-31')
+            activationDate: new Date(`${ayStartYear}-06-01`),
+            dueDate: new Date(`${ayStartYear}-07-31`)
           },
           {
             category: 'UDF Fee',
             amount: 1000,
             frequency: 'ANNUAL',
             semester: null,
-            activationDate: new Date('2026-06-01'),
-            dueDate: new Date('2026-07-31')
+            activationDate: new Date(`${ayStartYear}-06-01`),
+            dueDate: new Date(`${ayStartYear}-07-31`)
           },
           {
             category: 'Exam Fee',
             amount: 1000,
             frequency: 'SEMESTER',
             semester: 'Semester 1',
-            activationDate: new Date('2026-10-01'),
-            dueDate: new Date('2026-10-31')
+            activationDate: new Date(`${ayStartYear}-10-01`),
+            dueDate: new Date(`${ayStartYear}-10-31`)
           },
           {
             category: 'Exam Fee',
             amount: 1000,
             frequency: 'SEMESTER',
             semester: 'Semester 2',
-            activationDate: new Date('2027-03-01'),
-            dueDate: new Date('2027-03-31')
+            activationDate: new Date(`${ayEndYear}-03-01`),
+            dueDate: new Date(`${ayEndYear}-03-31`)
           },
           {
             category: 'Practical Fee',
             amount: 2000,
             frequency: 'SEMESTER',
             semester: 'Semester 1',
-            activationDate: new Date('2026-10-01'),
-            dueDate: new Date('2026-10-31')
+            activationDate: new Date(`${ayStartYear}-10-01`),
+            dueDate: new Date(`${ayStartYear}-10-31`)
           },
           {
             category: 'Practical Fee',
             amount: 2000,
             frequency: 'SEMESTER',
             semester: 'Semester 2',
-            activationDate: new Date('2027-03-01'),
-            dueDate: new Date('2027-03-31')
+            activationDate: new Date(`${ayEndYear}-03-01`),
+            dueDate: new Date(`${ayEndYear}-03-31`)
           }
         ];
 
@@ -666,8 +669,8 @@ exports.generateDemoFeeStructures = async (req, res) => {
             amount: 2000,
             frequency: 'ONE_TIME',
             semester: null,
-            activationDate: new Date('2026-06-01'),
-            dueDate: new Date('2026-07-31')
+            activationDate: new Date(`${ayStartYear}-06-01`),
+            dueDate: new Date(`${ayStartYear}-07-31`)
           });
         }
 

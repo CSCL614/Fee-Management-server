@@ -3,7 +3,8 @@ const Payment = require('../models/Payment');
 const Student = require('../models/Student');
 const Setting = require('../models/Setting');
 const { calculateFeeSummary, validatePaymentAmount } = require('../utils/feeCalculator');
-const { createAuditLog, generateReceiptNo } = require('../utils/helpers');
+const { createAuditLog, generateReceiptNo, generateStudentReceiptNo } = require('../utils/helpers');
+const { generateReceiptPdf } = require('../utils/receiptPdf');
 
 // @desc    Record a payment
 // @route   POST /api/payments
@@ -92,8 +93,8 @@ exports.recordPayment = async (req, res) => {
       : (finalAllocations.length === 1 ? finalAllocations[0].category : finalAllocations.map(a => a.category).join(', '));
     const primarySemester = semester || (finalAllocations.length === 1 ? finalAllocations[0].semester : null);
 
-    // Generate unique receipt number
-    const receiptNo = await generateReceiptNo();
+    // Generate student-based unique receipt number: YYCCCNNN-PPP
+    const receiptNo = await generateStudentReceiptNo(student);
 
     // Double-check receipt uniqueness
     const existingReceipt = await Payment.findOne({ receiptNo });
@@ -173,7 +174,7 @@ exports.getPayments = async (req, res) => {
   try {
     const {
       studentId, academicYear, paymentMode, status,
-      dateFrom, dateTo, page = 1, limit = 20
+      dateFrom, dateTo, receiptNo, search, page = 1, limit = 20
     } = req.query;
 
     const filter = {};
@@ -185,6 +186,30 @@ exports.getPayments = async (req, res) => {
       filter.paymentDate = {};
       if (dateFrom) filter.paymentDate.$gte = new Date(dateFrom);
       if (dateTo) filter.paymentDate.$lte = new Date(dateTo + 'T23:59:59.999Z');
+    }
+
+    const receiptTerm = (receiptNo || search || '').trim();
+    if (receiptTerm) {
+      const escaped = receiptTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const termRegex = new RegExp(escaped, 'i');
+
+      // Find any students whose name, roll number, or admission number matches
+      const matchingStudents = await Student.find({
+        $or: [
+          { name: termRegex },
+          { admissionNo: termRegex },
+          { rollNo: termRegex },
+          { studentId: termRegex }
+        ]
+      }, '_id').lean();
+      const matchingStudentIds = matchingStudents.map(s => s._id);
+
+      filter.$or = [
+        { receiptNo: termRegex },
+        { transactionId: termRegex },
+        { studentId: termRegex },
+        ...(matchingStudentIds.length > 0 ? [{ student: { $in: matchingStudentIds } }] : [])
+      ];
     }
 
     const total = await Payment.countDocuments(filter);
@@ -452,5 +477,33 @@ exports.getMonthlyCollection = async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// @desc    Download payment receipt PDF
+// @route   GET /api/payments/:id/receipt
+exports.downloadReceipt = async (req, res) => {
+  try {
+    const payment = mongoose.Types.ObjectId.isValid(req.params.id)
+      ? await Payment.findById(req.params.id).populate('student')
+      : await Payment.findOne({ receiptNo: req.params.id }).populate('student');
+
+    if (!payment) {
+      return res.status(404).json({ success: false, message: 'Payment record not found' });
+    }
+
+    const student = payment.student || await Student.findOne({ studentId: payment.studentId });
+    const settingsDocs = await Setting.find({ key: { $in: ['collegeName', 'collegeAddress'] } });
+    const settingsMap = {};
+    settingsDocs.forEach(s => { settingsMap[s.key] = s.value; });
+
+    const pdfBuffer = await generateReceiptPdf(payment, student, settingsMap);
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="Receipt_${payment.receiptNo}.pdf"`);
+    res.send(pdfBuffer);
+  } catch (error) {
+    console.error('Download receipt error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Failed to generate receipt PDF' });
   }
 };

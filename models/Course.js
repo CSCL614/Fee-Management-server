@@ -35,6 +35,12 @@ const courseSchema = new mongoose.Schema({
     type: String,
     enum: ['active', 'inactive'],
     default: 'active'
+  },
+  receiptCourseCode: {
+    type: String,
+    trim: true,
+    uppercase: true,
+    default: null
   }
 }, {
   timestamps: true
@@ -46,6 +52,19 @@ courseSchema.pre('validate', function(next) {
   }
   if (!this.courseName && this.degree && this.specialization) {
     this.courseName = `${this.degree} ${this.specialization}`;
+  }
+  if (!this.receiptCourseCode) {
+    const s = (this.specialization || '').toLowerCase();
+    const d = (this.degree || '').toLowerCase();
+    if (s.includes('zoology')) this.receiptCourseCode = 'ZOO';
+    else if (s.includes('organic')) this.receiptCourseCode = 'ORG';
+    else if (s.includes('chemistry')) this.receiptCourseCode = 'CHE';
+    else if (s.includes('computer science')) this.receiptCourseCode = 'CSC';
+    else if (s.includes('computer application')) this.receiptCourseCode = 'CCA';
+    else if (d === 'bca') this.receiptCourseCode = 'BCA';
+    else if (d === 'mca') this.receiptCourseCode = 'MCA';
+    else if (d === 'mba') this.receiptCourseCode = 'MBA';
+    else this.receiptCourseCode = (this.specialization || this.degree || 'GEN').replace(/[^a-zA-Z]/g, '').substring(0, 3).toUpperCase();
   }
   next();
 });

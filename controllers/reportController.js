@@ -39,6 +39,7 @@ exports.getDashboardStats = async (req, res) => {
     // Concurrently execute all independent dashboard metric queries in parallel
     const [
       totalStudents,
+      totalGraduated,
       feeAgg,
       collectionAgg,
       todayAgg,
@@ -53,6 +54,7 @@ exports.getDashboardStats = async (req, res) => {
       upcomingDemands
     ] = await Promise.all([
       Student.countDocuments({ status: 'Active' }),
+      Student.countDocuments({ status: 'Graduated' }),
 
       FeeDemand.aggregate([
         { $match: { status: 'active' } },
@@ -249,6 +251,7 @@ exports.getDashboardStats = async (req, res) => {
       success: true,
       data: {
         totalStudents,
+        totalGraduated,
         totalFee,
         totalCollected,
         totalPending,
@@ -283,13 +286,29 @@ exports.getDashboardStats = async (req, res) => {
 // @route   GET /api/reports/pending
 exports.getPendingReport = async (req, res) => {
   try {
-    const { course, level, year, academicYear } = req.query;
+    const { course, degree, level, year, studyYear, batch, academicYear, search } = req.query;
 
     const filter = { status: 'Active' };
-    if (course) filter.course = course;
-    if (level) filter.level = level;
-    if (year) filter.currentYear = year;
-    if (academicYear) filter.currentAcademicYear = academicYear;
+    if (course && course !== 'All') filter.course = course;
+    if (degree && degree !== 'All') filter.degree = degree;
+    if (level && level !== 'All') filter.level = level;
+    const yr = studyYear || year;
+    if (yr && yr !== 'All') filter.currentYear = yr;
+    if (batch && batch !== 'All') filter.batch = new RegExp(batch.trim(), 'i');
+    if (academicYear && academicYear !== 'All') filter.currentAcademicYear = academicYear;
+
+    if (search && search.trim()) {
+      const trimmed = search.trim();
+      const escaped = trimmed.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const searchRegex = new RegExp(escaped, 'i');
+      filter.$or = [
+        { name: searchRegex },
+        { studentId: searchRegex },
+        { admissionNo: searchRegex },
+        { rollNo: searchRegex },
+        { phone: searchRegex }
+      ];
+    }
 
     const students = await Student.find(filter).lean();
     if (students.length === 0) {
@@ -538,44 +557,127 @@ exports.getAgingReport = async (req, res) => {
   }
 };
 
-// @desc    Get Yearly Fee Inflow aggregated by month for selected calendar year
+// @desc    Get Yearly Fee Inflow aggregated by month (or day-by-day if month selected) for selected calendar year
 // @route   GET /api/reports/yearly-inflow
 exports.getYearlyInflow = async (req, res) => {
   try {
     const currentYear = new Date().getFullYear();
     const selectedYear = parseInt(req.query.year) || currentYear;
-    const startOfYear = new Date(selectedYear, 0, 1, 0, 0, 0, 0);
-    const startOfNextYear = new Date(selectedYear + 1, 0, 1, 0, 0, 0, 0);
+    const rawMonth = req.query.month;
+    const selectedMonth = (rawMonth && rawMonth !== 'all' && !isNaN(parseInt(rawMonth)))
+      ? parseInt(rawMonth)
+      : null;
+    const selectedCourse = req.query.course && req.query.course !== 'all' ? req.query.course.trim() : null;
 
-    const [monthlyAgg, distinctYearsAgg] = await Promise.all([
-      Payment.aggregate([
-        {
-          $match: {
-            paymentDate: { $gte: startOfYear, $lt: startOfNextYear },
-            status: 'completed'
-          }
-        },
-        {
-          $group: {
-            _id: { $month: '$paymentDate' },
-            total: { $sum: '$amountPaid' },
-            count: { $sum: 1 }
-          }
-        },
-        { $sort: { '_id': 1 } }
-      ]),
-      Payment.aggregate([
-        { $match: { status: 'completed' } },
-        { $group: { _id: { $year: '$paymentDate' } } },
-        { $sort: { _id: -1 } }
-      ])
-    ]);
+    let studentFilter = {};
+    if (selectedCourse) {
+      const studentsInCourse = await Student.find({
+        course: new RegExp(`^${escapeRegex(selectedCourse)}$`, 'i')
+      }, '_id').lean();
+      studentFilter = { student: { $in: studentsInCourse.map(s => s._id) } };
+    }
 
     const monthNamesShort = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
     const monthNamesFull = [
       'January', 'February', 'March', 'April', 'May', 'June',
       'July', 'August', 'September', 'October', 'November', 'December'
     ];
+
+    const distinctYearsAgg = await Payment.aggregate([
+      { $match: { status: 'completed' } },
+      { $group: { _id: { $year: '$paymentDate' } } },
+      { $sort: { _id: -1 } }
+    ]);
+
+    const paymentYears = distinctYearsAgg.map(p => p._id).filter(Boolean);
+    const availableYears = Array.from(new Set([currentYear, currentYear - 1, currentYear - 2, ...paymentYears])).sort((a, b) => b - a);
+
+    // If month is selected, compute day-by-day collection for that month
+    if (selectedMonth && selectedMonth >= 1 && selectedMonth <= 12) {
+      const startOfMonth = new Date(selectedYear, selectedMonth - 1, 1, 0, 0, 0, 0);
+      const startOfNextMonth = new Date(selectedYear, selectedMonth, 1, 0, 0, 0, 0);
+      const daysInMonth = new Date(selectedYear, selectedMonth, 0).getDate();
+
+      const dailyAgg = await Payment.aggregate([
+        {
+          $match: {
+            ...studentFilter,
+            paymentDate: { $gte: startOfMonth, $lt: startOfNextMonth },
+            status: 'completed'
+          }
+        },
+        {
+          $group: {
+            _id: { $dayOfMonth: '$paymentDate' },
+            total: { $sum: '$amountPaid' },
+            count: { $sum: 1 }
+          }
+        },
+        { $sort: { '_id': 1 } }
+      ]);
+
+      const dayMap = new Map();
+      for (const item of dailyAgg) {
+        dayMap.set(item._id, item);
+      }
+
+      const dailyData = [];
+      for (let day = 1; day <= daysInMonth; day++) {
+        const item = dayMap.get(day);
+        const monthShort = monthNamesShort[selectedMonth - 1];
+        const monthFull = monthNamesFull[selectedMonth - 1];
+        dailyData.push({
+          day,
+          label: `${day} ${monthShort}`,
+          fullDate: `${day} ${monthFull} ${selectedYear}`,
+          month: selectedMonth,
+          monthName: monthFull,
+          year: selectedYear,
+          amount: item ? item.total : 0,
+          count: item ? item.count : 0
+        });
+      }
+
+      return res.json({
+        success: true,
+        data: {
+          mode: 'daily',
+          year: selectedYear,
+          month: selectedMonth,
+          monthName: monthNamesFull[selectedMonth - 1],
+          course: selectedCourse,
+          availableYears,
+          monthlyData: dailyData, // for backwards compatibility
+          dailyData,
+          chartData: dailyData,
+          totalCollected: dailyData.reduce((s, d) => s + d.amount, 0),
+          totalTransactions: dailyData.reduce((s, d) => s + d.count, 0)
+        }
+      });
+    }
+
+    // Default: monthly view across January to December
+    const startOfYear = new Date(selectedYear, 0, 1, 0, 0, 0, 0);
+    const startOfNextYear = new Date(selectedYear + 1, 0, 1, 0, 0, 0, 0);
+
+    const monthlyAgg = await Payment.aggregate([
+      {
+        $match: {
+          ...studentFilter,
+          paymentDate: { $gte: startOfYear, $lt: startOfNextYear },
+          status: 'completed'
+        }
+      },
+      {
+        $group: {
+          _id: { $month: '$paymentDate' },
+          total: { $sum: '$amountPaid' },
+          count: { $sum: 1 }
+        }
+      },
+      { $sort: { '_id': 1 } }
+    ]);
+
     const inflowMap = new Map();
     for (const item of monthlyAgg) {
       inflowMap.set(item._id, item);
@@ -586,6 +688,7 @@ exports.getYearlyInflow = async (req, res) => {
       const data = inflowMap.get(monthNum);
       return {
         month: mName,
+        label: mName,
         monthName: monthNamesFull[idx],
         fullMonth: `${monthNamesFull[idx]} ${selectedYear}`,
         monthIndex: monthNum,
@@ -595,15 +698,18 @@ exports.getYearlyInflow = async (req, res) => {
       };
     });
 
-    const paymentYears = distinctYearsAgg.map(p => p._id).filter(Boolean);
-    const availableYears = Array.from(new Set([currentYear, currentYear - 1, currentYear - 2, ...paymentYears])).sort((a, b) => b - a);
-
     res.json({
       success: true,
       data: {
+        mode: 'monthly',
         year: selectedYear,
+        month: null,
+        monthName: null,
+        course: selectedCourse,
         availableYears,
         monthlyData,
+        dailyData: [],
+        chartData: monthlyData,
         totalCollected: monthlyData.reduce((s, m) => s + m.amount, 0),
         totalTransactions: monthlyData.reduce((s, m) => s + m.count, 0)
       }
