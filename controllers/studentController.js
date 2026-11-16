@@ -1730,6 +1730,106 @@ exports.graduateStudent = async (req, res) => {
 };
 
 /**
+ * @desc    Bulk graduate active students (transition to Alumni / Graduated)
+ * @route   POST /api/students/bulk-graduate
+ * @access  Admin Only
+ */
+exports.bulkGraduateStudents = async (req, res) => {
+  try {
+    const {
+      studentIds,
+      passingYear,
+      passingAcademicYear,
+      completionDate,
+      graduationRemarks,
+      defaultResultStatus = 'Passed'
+    } = req.body;
+
+    if (!Array.isArray(studentIds) || studentIds.length === 0) {
+      return res.status(400).json({ success: false, message: 'Please provide at least one student ID to graduate' });
+    }
+
+    const resolvedPassingYear = parseInt(passingYear, 10) || new Date().getFullYear();
+    const resolvedCompletionDate = completionDate ? new Date(completionDate) : new Date();
+
+    const students = await Student.find({
+      _id: { $in: studentIds },
+      status: { $ne: 'Graduated' }
+    });
+
+    if (students.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'No eligible active students found for graduation from the selected list'
+      });
+    }
+
+    const graduatedList = [];
+    const now = new Date();
+
+    for (const student of students) {
+      const resolvedAcademicYear = passingAcademicYear || student.currentAcademicYear || `${resolvedPassingYear - 1}-${String(resolvedPassingYear).slice(-2)}`;
+
+      student.status = 'Graduated';
+      student.graduation = {
+        passingYear: resolvedPassingYear,
+        passingAcademicYear: resolvedAcademicYear,
+        completionDate: isNaN(resolvedCompletionDate.getTime()) ? now : resolvedCompletionDate,
+        graduatedAt: now,
+        graduatedBy: req.user._id,
+        graduatedByName: req.user.name,
+        graduationRemarks: graduationRemarks ? graduationRemarks.trim() : 'Bulk batch graduation',
+        academicResult: {
+          course: student.course,
+          specialization: student.specialization,
+          admissionYear: student.admissionYear || student.batchStartYear,
+          passingYear: resolvedPassingYear,
+          finalSemester: student.level === 'PG' ? 'Semester IV' : 'Semester VI',
+          resultStatus: defaultResultStatus || 'Passed',
+          remarks: graduationRemarks ? graduationRemarks.trim() : ''
+        },
+        restorationHistory: student.graduation?.restorationHistory || []
+      };
+
+      await student.save();
+      graduatedList.push({
+        _id: student._id,
+        studentId: student.studentId,
+        admissionNo: student.admissionNo,
+        name: student.name
+      });
+    }
+
+    await createAuditLog({
+      user: req.user._id,
+      userName: req.user.name,
+      userRole: req.user.role,
+      action: 'Bulk Students Graduated',
+      entity: 'Student',
+      entityId: `bulk-${Date.now()}`,
+      description: `Bulk graduated ${graduatedList.length} students into Alumni. Passing Year: ${resolvedPassingYear}. Financial records & dues preserved.`,
+      newValue: {
+        graduatedCount: graduatedList.length,
+        passingYear: resolvedPassingYear,
+        students: graduatedList.map(s => `${s.name} (${s.admissionNo || s.studentId})`)
+      },
+      reason: graduationRemarks || 'Batch graduation',
+      ipAddress: req.ip
+    });
+
+    res.json({
+      success: true,
+      message: `Successfully graduated ${graduatedList.length} student(s) to Alumni status with Passing Year ${resolvedPassingYear}.`,
+      count: graduatedList.length,
+      graduatedStudents: graduatedList
+    });
+  } catch (error) {
+    console.error('Bulk graduate students error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Server error' });
+  }
+};
+
+/**
  * @desc    Restore a graduated student back to Active status
  * @route   POST /api/students/:id/restore
  * @access  Admin Only

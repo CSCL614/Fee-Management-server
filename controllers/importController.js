@@ -195,6 +195,8 @@ function mapRowData(rawRow) {
   const paymentMethod = String(getVal('Payment Method', ['Payment Mode', 'Mode', 'Channel'])).trim();
   const rawPaymentDate = getVal('Last Payment Date', ['Payment Date', 'Date of Payment']);
   const lastPaymentDate = parseExcelDate(rawPaymentDate);
+  const rawStatus = String(getVal('Status', ['Student Status', 'Graduation Status', 'Enrollment Status', 'State'])).trim();
+  const passingYear = parseNumber(getVal('Passing Year', ['Graduation Year', 'Year of Passing', 'Passout Year']));
 
   return {
     admissionNo: admNo,
@@ -213,6 +215,8 @@ function mapRowData(rawRow) {
     phone,
     gender,
     address,
+    status: rawStatus || 'Active',
+    passingYear: passingYear || null,
     feeCommitment,
     tuitionFee,
     udfFee,
@@ -816,8 +820,32 @@ exports.confirmImport = [
           fatherName: row.fatherName || undefined,
           address: row.address || undefined,
           gender: row.gender ? (row.gender.toLowerCase().startsWith('f') ? 'Female' : 'Male') : undefined,
-          status: 'Active'
-        });
+          status: (row.status && (row.status.toLowerCase() === 'graduated' || row.status.toLowerCase() === 'alumni')) ? 'Graduated' : 'Active'
+        };
+
+        if (studentData.status === 'Graduated') {
+          const resolvedPassingYear = row.passingYear || batchEndYear || new Date().getFullYear();
+          studentData.graduation = {
+            passingYear: resolvedPassingYear,
+            passingAcademicYear: row.academicYear,
+            completionDate: new Date(),
+            graduatedAt: new Date(),
+            graduatedBy: req.user?._id,
+            graduatedByName: req.user?.name || 'Excel Import',
+            graduationRemarks: 'Bulk imported historical graduated student (Alumni)',
+            academicResult: {
+              course: courseDisplayName,
+              specialization: row.specialization,
+              admissionYear: row.admissionYear || batchStartYear,
+              passingYear: resolvedPassingYear,
+              finalSemester: derivedLevel === 'PG' ? 'Semester IV' : 'Semester VI',
+              resultStatus: 'Passed'
+            },
+            restorationHistory: []
+          };
+        }
+
+        const newStudent = new Student(studentData);
 
         insertedStudents.push(newStudent);
 

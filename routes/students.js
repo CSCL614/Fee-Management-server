@@ -10,7 +10,7 @@ const {
   previewBulkDelete, bulkDeleteStudents,
   getStudentConcession, updateStudentConcession,
   getGraduatedStudents, getGraduationSuggestions, graduateStudent,
-  restoreStudent, updateAcademicResults
+  restoreStudent, updateAcademicResults, bulkGraduateStudents
 } = require('../controllers/studentController');
 
 // Public/direct image serving endpoint
@@ -32,6 +32,9 @@ router.post('/bulk-delete', protect, authorize('admin'), bulkDeleteStudents);
 
 // Requirement 2: Temp Photo Upload (Admin and Accountant)
 router.post('/upload-photo', protect, authorize('admin', 'accountant'), uploadPhoto.single('photo'), uploadTempPhoto);
+
+// Graduated Student Actions (Admin only)
+router.post('/bulk-graduate', protect, authorize('admin'), bulkGraduateStudents);
 
 // Student detail routes
 router.get('/:id', protect, getStudent);
