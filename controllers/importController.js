@@ -795,7 +795,7 @@ exports.confirmImport = [
         const studentId = await generateId(Student, 'STU', 'studentId');
 
         // Create student document
-        const newStudent = await Student.create({
+        const studentData = {
           studentId,
           admissionNo: row.admissionNo,
           name: row.name,
@@ -845,7 +845,7 @@ exports.confirmImport = [
           };
         }
 
-        const newStudent = new Student(studentData);
+        const newStudent = await Student.create(studentData);
 
         insertedStudents.push(newStudent);
 
