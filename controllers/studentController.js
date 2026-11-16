@@ -1836,6 +1836,107 @@ exports.bulkGraduateStudents = async (req, res) => {
 };
 
 /**
+ * @desc    Auto-graduate all active students whose course duration / batch end year has passed
+ * @route   POST /api/students/auto-graduate-past-due
+ * @access  Admin Only
+ */
+exports.autoGraduatePastDueStudents = async (req, res) => {
+  try {
+    const currentCalendarYear = new Date().getFullYear();
+    const activeStudents = await Student.find({ status: 'Active' });
+
+    const eligibleToGraduate = [];
+    for (const student of activeStudents) {
+      const duration = student.duration || (student.level === 'PG' ? 2 : 3);
+      const admissionYear = student.admissionYear || student.batchStartYear || null;
+      const expectedEndYear = admissionYear ? admissionYear + duration : (student.batchEndYear || null);
+
+      // If expected completion year has passed or is reached
+      if (expectedEndYear && expectedEndYear <= currentCalendarYear) {
+        eligibleToGraduate.push({
+          student,
+          expectedEndYear,
+          passingAcademicYear: `${expectedEndYear - 1}-${String(expectedEndYear).slice(-2)}`
+        });
+      }
+    }
+
+    if (eligibleToGraduate.length === 0) {
+      return res.json({
+        success: true,
+        message: 'No past-due active students found. All student cohorts are up to date!',
+        count: 0,
+        graduatedStudents: []
+      });
+    }
+
+    const graduatedList = [];
+    const now = new Date();
+
+    for (const item of eligibleToGraduate) {
+      const { student, expectedEndYear, passingAcademicYear } = item;
+
+      student.status = 'Graduated';
+      student.graduation = {
+        passingYear: expectedEndYear,
+        passingAcademicYear,
+        completionDate: new Date(`${expectedEndYear}-06-30`),
+        graduatedAt: now,
+        graduatedBy: req.user._id,
+        graduatedByName: req.user.name,
+        graduationRemarks: `Auto-graduated based on course duration completion (Batch: ${student.batch || `${student.admissionYear || expectedEndYear - (student.duration || 3)}-${expectedEndYear}`})`,
+        academicResult: {
+          course: student.course,
+          specialization: student.specialization,
+          admissionYear: student.admissionYear || student.batchStartYear || (expectedEndYear - (student.duration || 3)),
+          passingYear: expectedEndYear,
+          finalSemester: student.level === 'PG' ? 'Semester IV' : 'Semester VI',
+          resultStatus: 'Passed',
+          remarks: 'Auto-graduated at course completion'
+        },
+        restorationHistory: student.graduation?.restorationHistory || []
+      };
+
+      await student.save();
+      graduatedList.push({
+        _id: student._id,
+        studentId: student.studentId,
+        admissionNo: student.admissionNo,
+        name: student.name,
+        batch: student.batch,
+        passingYear: expectedEndYear
+      });
+    }
+
+    await createAuditLog({
+      user: req.user._id,
+      userName: req.user.name,
+      userRole: req.user.role,
+      action: 'Auto-Graduated Past-Due Batches',
+      entity: 'Student',
+      entityId: `auto-grad-${Date.now()}`,
+      description: `Auto-graduated ${graduatedList.length} past-due students across batches into Alumni records. All financial dues and receipts preserved.`,
+      newValue: {
+        graduatedCount: graduatedList.length,
+        students: graduatedList.map(s => `${s.name} (${s.admissionNo || s.studentId}, Class of ${s.passingYear})`)
+      },
+      reason: 'Automated batch duration progression',
+      ipAddress: req.ip
+    });
+
+    res.json({
+      success: true,
+      message: `Successfully auto-graduated ${graduatedList.length} past-due student(s) into Alumni records.`,
+      count: graduatedList.length,
+      graduatedStudents: graduatedList
+    });
+  } catch (error) {
+    console.error('Auto graduate past-due students error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Server error' });
+  }
+};
+
+/**
  * @desc    Restore a graduated student back to Active status
  * @route   POST /api/students/:id/restore
  * @access  Admin Only

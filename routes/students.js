@@ -10,7 +10,8 @@ const {
   previewBulkDelete, bulkDeleteStudents,
   getStudentConcession, updateStudentConcession,
   getGraduatedStudents, getGraduationSuggestions, graduateStudent,
-  restoreStudent, updateAcademicResults, bulkGraduateStudents
+  restoreStudent, updateAcademicResults, bulkGraduateStudents,
+  autoGraduatePastDueStudents
 } = require('../controllers/studentController');
 
 // Public/direct image serving endpoint
@@ -35,6 +36,7 @@ router.post('/upload-photo', protect, authorize('admin', 'accountant'), uploadPh
 
 // Graduated Student Actions (Admin only)
 router.post('/bulk-graduate', protect, authorize('admin'), bulkGraduateStudents);
+router.post('/auto-graduate-past-due', protect, authorize('admin'), autoGraduatePastDueStudents);
 
 // Student detail routes
 router.get('/:id', protect, getStudent);
